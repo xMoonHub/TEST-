@@ -420,6 +420,8 @@ local function equipWeapon()
     local spec = Config.SeaTool
     if spec and os.clock() < Config.SeaUntil then -- Sea Events: arma escolhida para o evento
         if spec.name then tool, equipped = findToolByName(spec.name) else tool, equipped = findTool(spec.tip) end
+    elseif Config.MastName then
+        tool, equipped = findToolByName(string.lower(Config.MastName))
     else
         tool, equipped = findTool(Config.Weapon)
     end
@@ -621,13 +623,6 @@ pcall(function()
             elseif Aim.camChanged then
                 restoreCamera()
             end
-            if cam and cam.CameraType ~= Enum.CameraType.Scriptable then
-                local cf = cam.CFrame
-                local lv = cf.LookVector
-                if math.abs(cf.UpVector.Y) < 0.999 and math.abs(lv.Y) < 0.98 then
-                    cam.CFrame = CFrame.lookAt(cf.Position, cf.Position + lv, Vector3.yAxis)
-                end
-            end
         end)
     end)
 end)
@@ -757,6 +752,14 @@ local function attackTick()
         Aim.on = false
         return 0.1
     end
+    local sc = Config.SeaClick
+    if sc and os.clock() < sc.untilT and sc.part and sc.part.Parent then
+        Aim.on = false
+        if os.clock() - lastEquip > 0.3 then lastEquip = os.clock(); pcall(equipWeapon) end
+        if sc.kind == "fruit" then pcall(FruitM1.tick) else pcall(Config.ShotFire, sc) end
+        return 0.05
+    end
+    if Config.MastTick and Config.MastTick() then return 0.05 end
     local cam = workspace.CurrentCamera
     -- garante que a arma continua equipada (se ela sair da mão, nenhum método bate)
     if os.clock() - lastEquip > 0.3 then
@@ -780,7 +783,7 @@ local function attackTick()
     State.atkAt = os.clock()
     -- v28: Melee/Sword no Auto — o Net roda A CADA passo (sem esperar o ritmo do M1 do jogo, que era o delay do clique)
     -- e o M1 do jogo vai em paralelo, limitado a 20 golpes/s.
-    local netAssist = Config.AttackMethod == "Auto" and (Config.Weapon == "Melee" or Config.Weapon == "Sword")
+    local netAssist = Config.AttackMethod == "Auto" and (Config.Weapon == "Melee" or Config.Weapon == "Sword" or Config.MastName ~= nil)
         and method ~= "Net" and os.clock() >= Config.SeaUntil and doNetAttack and not Watch.skip["Net"]
     if netAssist then
         if os.clock() - (State.baseAt or 0) > 0 then
@@ -972,7 +975,7 @@ local function netAttackOnce()
     local function gather(source)
         for _, enemy in ipairs(source) do
             local eh, er = aliveParts(enemy)
-            if eh and (er.Position - root.Position).Magnitude <= 60 then
+            if eh and not (Config.MastSkip and Config.MastSkip(eh)) and (er.Position - root.Position).Magnitude <= 60 then
                 targets[#targets + 1] = { enemy, er } -- 1 parte por mob (mandar todas as partes travava o jogo)
                 if #targets >= math.min(NET_MAX_TARGETS, math.max(2, Config.Bring or 2)) then break end
             end
@@ -3787,12 +3790,24 @@ do
         return false
     end
 
-    local function active()
-        local ok, v = pcall(function() return Player.PlayerGui.Main.Timer.Visible end)
-        if ok and v == true then return true end
+    -- ilha da raid perto de você (Banana: "Island N" a menos de 3000; Quantum: 3500)
+    local function nearIsland()
         local wo = workspace:FindFirstChild("_WorldOrigin")
         local loc = wo and wo:FindFirstChild("Locations")
-        return loc ~= nil and loc:FindFirstChild("Island 1") ~= nil
+        local _, hrp = getChar()
+        if not (loc and hrp) then return nil end
+        local best, bn = nil, 0
+        for _, ch in ipairs(loc:GetChildren()) do
+            local n = tonumber(string.match(ch.Name, "^Island (%d+)$") or "")
+            if n and ch:IsA("BasePart") and (ch.Position - hrp.Position).Magnitude < 3500 and n > bn then best, bn = ch, n end
+        end
+        return best
+    end
+    -- em raid = atributo IslandRaiding (Quantum) ou timer da raid visível + ilha por perto (Banana)
+    local function active()
+        if Player:GetAttribute("IslandRaiding") == true then return true end
+        local ok, v = pcall(function() return Player.PlayerGui.Main.TopHUDList.RaidTimer.Visible end)
+        return (ok and v == true and nearIsland() ~= nil) or false
     end
     R.active = active
 
@@ -3911,6 +3926,7 @@ do
             local p = prepare(adv, need)
             if p ~= true then return p end
             -- 1) try right here (the server may not need us to be next to the NPC)
+            invoke("RaidsNpc", "Check")
             local ok, res = invoke("RaidsNpc", "Select", Config.RaidType)
             Diag.raid = string.format("Auto Pay (%s) %s -> %s", Config.PayMode, Config.RaidType, ok and describe(res) or ("error: " .. tostring(res)))
             task.wait(1)
@@ -3974,18 +3990,12 @@ do
             fightEnemy(best, { best.Name }, true)
             return true
         end
-        local wo = workspace:FindFirstChild("_WorldOrigin")
-        local loc = wo and wo:FindFirstChild("Locations")
-        if loc then
-            for i = 5, 1, -1 do
-                local isl = loc:FindFirstChild("Island " .. i)
-                local cf = isl and posOf(isl)
-                if cf then
-                    State.Text = "Raid: going to island " .. i
-                    flyTo(cf * CFrame.new(0, 40, 0))
-                    return true
-                end
-            end
+        local isl = nearIsland()
+        if isl then
+            State.Text = "Raid: going to " .. isl.Name
+            local off = (isl.Name == "Island 2" and Config.RaidType == "Phoenix") and Vector3.new(300, 60, 0) or Vector3.new(0, 60, 0)
+            flyTo(CFrame.new(isl.Position + off))
+            return true
         end
         State.Text = "Raid: waiting for mobs"
         return true
@@ -4347,6 +4357,7 @@ do
             hrp.AssemblyLinearVelocity = Vector3.zero
         end
         local w = m1Weapon(t.type)
+        Config.SeaClick = w and { kind = (w.name == "dragonstorm" and "ds") or (w.name == "skull guitar" and "sg") or "fruit", part = t.part, untilT = os.clock() + 0.8 } or nil
         if w then
             Config.SeaTool = w
             pcall(equipWeapon)
@@ -4443,6 +4454,7 @@ do
     Sea.step = function(force)
         Sea.st = st
         local o = Config.SeaOpt
+        if force then Sea.forceUntil = os.clock() + 1.5 end
         if not (Config.SeaOn or force) then st.cruise = nil; return false end
         if getSea() < 2 then Diag.sea = "Sea Events: Sea 1 does not work (use Sea 2 or 3)"; return false end
         local char, hrp, hum = getChar()
@@ -4540,7 +4552,7 @@ do
     -- Sem colisão total enquanto estiver no barco: roda a cada passo de física (Stepped), com a lista de peças em cache
     local ncParts, ncAt = {}, 0
     table.insert(Connections, RunService.Stepped:Connect(function()
-        if not (Alive and Config.SeaOn) then return end
+        if not (Alive and (Config.SeaOn or os.clock() < (Sea.forceUntil or 0))) then return end
         local char, _, hum = getChar()
         if not (char and hum and hum.SeatPart) then return end
         local boat = hum.SeatPart:FindFirstAncestorOfClass("Model")
@@ -4563,7 +4575,7 @@ do
     table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
         local c = st.cruise
         if not (Alive and c) then return end
-        if not (Config.SeaOn and c.boat and c.boat.Parent) then st.cruise = nil; return end
+        if not ((Config.SeaOn or os.clock() < (Sea.forceUntil or 0)) and c.boat and c.boat.Parent) then st.cruise = nil; return end
         pcall(function()
             local pos = c.boat:GetPivot().Position
             local dir = Vector3.new(c.target.X - pos.X, 0, c.target.Z - pos.Z)
@@ -4589,10 +4601,12 @@ do
 end
 
 -- ============ FEATURES / PRIORITIES ============
-AFL.FeatOrder = { "Dungeon", "Fruit", "Gacha", "Raid", "Mirage", "Vulcan", "Sea", "Pirate", "Elite", "Factory", "Chest", "Secret", "Boss", "Awk", "Tyrant", "DoughKill", "DoughSpawn", "Normal" }
+AFL.FeatOrder = { "Dungeon", "Fruit", "Gacha", "Race", "Raid", "Mirage", "Vulcan", "Kitsune", "Leviathan", "Sea", "Pirate", "Elite", "Factory", "Chest", "Secret", "Boss", "Awk", "Tyrant", "DoughKill", "DoughSpawn", "Normal" }
 AFL.feat = {
     Dungeon = { label = "Auto Dungeon", boss = true, listed = function() return Config.DunFarm or Config.DunJoin end, on = function() return Config.DunFarm or Config.DunJoin end,
         run = function() return AFL.Dun and AFL.Dun.step() end },
+    Race = { label = "Auto Races", listed = function() return AFL.Race and AFL.Race.listed() end, on = function() return AFL.Race and AFL.Race.listed() end,
+        run = function() return AFL.Race and AFL.Race.step() end },
     Fruit = { label = "Auto Collect Fruit", boss = true, listed = function() return Config.CollectFruits end, on = function() return Config.CollectFruits end,
         run = function()
             local fruit = findGroundFruit()
@@ -4629,6 +4643,12 @@ AFL.feat = {
         run = function() return AFL.Boss.step() end },
     Awk = { label = "Auto Awk Boss", listed = function() return Config.AwkOn end, on = function() return Config.AwkOn end,
         run = function() return AFL.Awk.step() end },
+    Kitsune = { label = "Auto Kitsune Island", listed = function() return Config.KitTP or Config.KitSpawn or Config.KitSummon or Config.KitCollect or Config.KitTrade end,
+        on = function() return (Config.KitTP or Config.KitSpawn or Config.KitSummon or Config.KitCollect or Config.KitTrade) and getSea() == 3 end,
+        run = function() return AFL.SeaEv.kitStep() end },
+    Leviathan = { label = "Auto Leviathan", listed = function() return Config.LevSpy or Config.LevFind or Config.LevStart or Config.LevTP or Config.LevBoatTo or Config.LevAttack or Config.LevHeart end,
+        on = function() return (Config.LevSpy or Config.LevFind or Config.LevStart or Config.LevTP or Config.LevBoatTo or Config.LevAttack or Config.LevHeart) and getSea() == 3 end,
+        run = function() return AFL.SeaEv.levStep() end },
     Mirage = { label = "Auto Mirage", listed = function() return Config.MirageOn end, on = function() return Config.MirageOn and getSea() == 3 end,
         run = function() return AFL.Mirage.step() end },
     Vulcan = { label = "Auto Farm Vulcan", listed = function() return Config.VulcFull or Config.VulcMagnet or Config.VulcFind or Config.VulcStart or Config.VulcEgg or Config.VulcBone end,
@@ -4668,15 +4688,44 @@ AFL.feat = {
     Normal = { label = "Normal Farm", hidden = true, listed = function() return false end, on = function() return true end,
         run = function() normalStep() return State.Busy end },
 }
-AFL.featKey = { ["Auto Dungeon"] = "Dungeon", ["Auto Collect Fruit"] = "Fruit", ["Sea Events"] = "Sea", ["Auto Pirate Raid"] = "Pirate",
-    ["Auto Elite Hunter"] = "Elite", ["Auto Factory"] = "Factory", ["Auto Farm Chest"] = "Chest", ["Auto Kill Boss"] = "Boss", ["Auto Awk Boss"] = "Awk", ["Auto Mirage"] = "Mirage", ["Auto Farm Vulcan"] = "Vulcan",
+AFL.featKey = { ["Auto Dungeon"] = "Dungeon", ["Auto Races"] = "Race", ["Auto Collect Fruit"] = "Fruit", ["Sea Events"] = "Sea", ["Auto Pirate Raid"] = "Pirate",
+    ["Auto Elite Hunter"] = "Elite", ["Auto Factory"] = "Factory", ["Auto Farm Chest"] = "Chest", ["Auto Kill Boss"] = "Boss", ["Auto Awk Boss"] = "Awk", ["Auto Mirage"] = "Mirage", ["Auto Kitsune Island"] = "Kitsune", ["Auto Leviathan"] = "Leviathan", ["Auto Farm Vulcan"] = "Vulcan",
     ["Auto Kill Tyrant of the Skies"] = "Tyrant", ["Auto Spawn Tyrant of the Skies"] = "Tyrant",
     ["Auto Kill Dough Prince"] = "DoughKill", ["Auto Spawn Dough Prince"] = "DoughSpawn" }
+-- ============ SEGURANÇA: um recurso com erro não derruba o loop nem os outros ============
+AFL.Err = { list = {}, count = {}, quar = {} }
+function AFL.logErr(key, msg)
+    local L = AFL.Err.list
+    L[#L + 1] = { t = os.date("%H:%M:%S"), key = key, msg = tostring(msg) }
+    if #L > 40 then table.remove(L, 1) end
+    warn("[Moon Hub] " .. tostring(key) .. ": " .. tostring(msg))
+end
+function AFL.featOn(key, f)
+    if (AFL.Err.quar[key] or 0) > os.clock() then return false end
+    local ok, r = pcall(f.on)
+    if not ok then AFL.logErr(key, "on(): " .. tostring(r)); return false end
+    return r
+end
+function AFL.featRun(key, f)
+    local ok, r = pcall(f.run)
+    if ok then AFL.Err.count[key] = 0; return r end
+    local c = (AFL.Err.count[key] or 0) + 1
+    AFL.Err.count[key] = c
+    AFL.logErr(key, r)
+    if c >= 3 then
+        AFL.Err.quar[key] = os.clock() + 30
+        AFL.Err.count[key] = 0
+        AFL.logErr(key, "failed 3 times in a row: paused for 30s (the other functions keep running)")
+    end
+    return false
+end
 function AFL.prioOrder()
     local order, seen = {}, {}
-    for _, label in ipairs(Config.Prio or {}) do
-        local key = AFL.featKey[label]
-        if key and not seen[key] then seen[key] = true; order[#order + 1] = key end
+    if Config.PrioDefault == false then
+        for _, label in ipairs(Config.Prio or {}) do
+            local key = AFL.featKey[label]
+            if key and not seen[key] then seen[key] = true; order[#order + 1] = key end
+        end
     end
     for _, key in ipairs(AFL.FeatOrder) do
         if not seen[key] then seen[key] = true; order[#order + 1] = key end
@@ -4699,8 +4748,8 @@ AFL.runMain = function(myEpoch)
 
                 for _, key in ipairs(AFL.prioOrder()) do
                     local f = AFL.feat[key]
-                    if f and not (f.boss and bossBusy) and f.on() then
-                        if f.run() then
+                    if f and not (f.boss and bossBusy) and AFL.featOn(key, f) then
+                        if AFL.featRun(key, f) then
                             State.Busy = true
                             return
                         end
@@ -4812,7 +4861,7 @@ local saveAll, persist
 do
 local HttpService = game:GetService("HttpService")
 local SAVE_FILE = "MoonHub_KeyPro.json"
-local SAVED_KEYS = { "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
+local SAVED_KEYS = { "AutoAwaken", "WebhookOn", "RaceReroll", "RaceTarget", "RaceGhoul", "RaceGhoulHop", "RaceCyborg", "RaceV2", "RaceV3", "RaceV3Pvp", "RaceLever", "RaceGear", "RaceV4Auto", "MastOn", "MastMethod", "MastHP", "MastFast", "MastHold", "MastAllSword", "MastAllMelee", "MastAllGun", "PrioDefault", "UIScale", "MobileMode", "UIAspect", "UIAnimStyle", "UIAnim", "UIAnimSpeed", "UIW", "UIH", "UILock", "KitTP", "KitSpawn", "KitSummon", "KitCollect", "KitTrade", "KitAzure", "LevSpy", "LevFind", "LevSpeed", "LevBack", "LevStart", "LevTP", "LevBoatTo", "LevAttack", "LevFruit", "LevDragon", "LevFast", "LevHold", "LevWeapons", "LevKeys", "LevGuitar", "LevSkills", "LevHeart", "AimOn", "AimMode", "AimTargets", "AimPriority", "AimPart", "AimFOV", "AimShowFOV", "AimFOVColor", "AimFOVOrigin", "AimSmooth", "AimPredict", "AimPredictOn", "AimMaxDist", "AimVisible", "AimTeam", "AimSticky", "AimTrigger", "AimKey", "AimHighlight", "AimLine", "AimMinHP", "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
     "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones",
     "Weapon", "AttackMode", "Bring", "TweenSpeed", "AutoBuso", "AutoKen", "AutoV3", "AutoV4",
     "RemoveFog", "FpsBooster", "ToggleKey",
@@ -5665,7 +5714,7 @@ do
             by[k] = by[k] or { id = r.ItemId, at = {} }
             if r.Value ~= nil then by[k].at[r.Key] = r.Value end
         end
-        local m, n = {}, 0
+        local m, n, mast = {}, 0, {}
         for _, it in next, by do
             local okc, conf = pcall(function() return cfg2.match(it.id):unwrap() end)
             local names = {}
@@ -5677,8 +5726,9 @@ do
                 local sk = conf.Index and conf.Index.StorageKey
                 if sk then names[#names + 1] = tostring(sk) end
             end
-            local q = tonumber(it.at.Quantity)
-            if not q and it.at.IsOwned == true then q = 1 end
+            local mv = tonumber(it.at.Mastery)
+            if mv and it.at.IsOwned == true then for _, nm in ipairs(names) do mast[nm] = math.max(mast[nm] or 0, mv) end end
+            local q = tonumber(it.at.Quantity) -- só Quantity conta (IsOwned também vale para receitas/itens desbloqueados e dava falso positivo)
             if q and q > 0 and #names > 0 then
                 n += 1
                 for _, nm in ipairs(names) do
@@ -5689,6 +5739,7 @@ do
             end
         end
         if n == 0 then return nil, "GetAllItemValues returned " .. rows .. " rows but no item matched" end
+        I.mast = mast
         return m, n .. " items read (GetAllItemValues)"
     end
     function I.refresh()
@@ -5728,11 +5779,99 @@ do
         if ok then I.map, I.state = m, n .. " item types read from the game data"
         else I.state = "read error: " .. tostring(err) end
     end
+    function I.mastery(name) return I.mast and I.mast[name] or nil end
     function I.count(name)
         pcall(I.refresh)
         local nk = "#" .. string.lower(string.gsub(tostring(name), "[^%w]", ""))
         return I.map[name] or I.map[nk] or 0
     end
+end
+
+
+-- ---- Tiro por remote (Dragonstorm / Skull Guitar): mira sozinho no alvo, sem clicar na tela e sem mexer na câmera ----
+-- Base: Quantum Onyx (RE/ShootGunEvent + Validator2 com o contador do CombatController) e Banana (SpamGunDragonStorm / Skull Guitar "TAP").
+AFL.Shot = { last = 0, state = "not started" }
+do
+    local S = AFL.Shot
+    local RS = game:GetService("ReplicatedStorage")
+    local getup = getupvalue or (debug and debug.getupvalue)
+    local setup = setupvalue or (debug and debug.setupvalue)
+    local ctrlFn, shootEv, validator
+    local function init()
+        if shootEv and validator then return true end
+        pcall(function()
+            local mods = RS:FindFirstChild("Modules")
+            local net = mods and mods:FindFirstChild("Net")
+            shootEv = shootEv or (net and net:FindFirstChild("RE/ShootGunEvent"))
+            local rem = RS:FindFirstChild("Remotes")
+            validator = validator or (rem and rem:FindFirstChild("Validator2"))
+        end)
+        return shootEv ~= nil
+    end
+    -- contador que o servidor confere (mesma conta do CombatController)
+    local function sig()
+        if not ctrlFn and getup then
+            pcall(function()
+                local cc = require(RS.Controllers.CombatController)
+                ctrlFn = getup(cc.Attack, 9)
+            end)
+        end
+        if not (ctrlFn and getup and setup) then return 0, 0 end
+        local ok, a, b = pcall(function()
+            local v19, v20, v21, v22 = getup(ctrlFn, 15), getup(ctrlFn, 13), getup(ctrlFn, 16), getup(ctrlFn, 17)
+            local v23, v24, v25 = getup(ctrlFn, 14), getup(ctrlFn, 18), getup(ctrlFn, 19)
+            if not (v19 and v20 and v21 and v22 and v23 and v24 and v25) then return 0, 0 end
+            local n = ((v19 * v23 + v20 * v21) % v22 * v22 + v20 * v23) % v24
+            local n2 = math.floor(n / v22)
+            local n3 = n - n2 * v22
+            local n4 = v25 + 1
+            setup(ctrlFn, 15, n2); setup(ctrlFn, 13, n3); setup(ctrlFn, 19, n4)
+            return math.floor(n / v24 * 16777215), n4
+        end)
+        if ok then return a, b end
+        return 0, 0
+    end
+    function S.fire(sc)
+        local char = Player.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        local part = sc.part
+        if not (tool and part and part.Parent) then return end
+        local name = string.lower(tool.Name)
+        local pos = part.Position
+        if os.clock() - S.last < 0.1 then return end
+        if sc.kind == "sg" and string.find(name, "skull guitar", 1, true) then
+            S.last = os.clock()
+            local re = tool:FindFirstChild("RemoteEvent")
+            if re then re:FireServer("TAP", pos); S.state = "Skull Guitar: TAP" end
+        elseif sc.kind == "gun" and tool.ToolTip == "Gun" then
+            S.last = os.clock()
+            local re = tool:FindFirstChild("RemoteEvent")
+            if re and string.find(name, "skull guitar", 1, true) then re:FireServer("TAP", pos); S.state = "Skull Guitar: TAP"; return end
+            if not init() then S.state = "RE/ShootGunEvent not found"; return end
+            pcall(function()
+                tool:SetAttribute("IsReloading_Client", false)
+                tool:SetAttribute("LocalShotsLeft", 100)
+                tool:SetAttribute("LocalTotalShots", (tool:GetAttribute("LocalTotalShots") or 0) + 1)
+            end)
+            local a, b = sig()
+            if validator then pcall(function() validator:FireServer(a, b) end) end
+            pcall(function() shootEv:FireServer(pos, { part }) end)
+            S.state = "Gun " .. tool.Name .. ": shot at " .. tostring(part.Name)
+        elseif sc.kind == "ds" and string.find(name, "dragonstorm", 1, true) then
+            if not init() then S.state = "RE/ShootGunEvent not found"; return end
+            S.last = os.clock()
+            pcall(function()
+                tool:SetAttribute("IsReloading_Client", false)
+                tool:SetAttribute("LocalShotsLeft", 100)
+                tool:SetAttribute("LocalTotalShots", (tool:GetAttribute("LocalTotalShots") or 0) + 1)
+            end)
+            local a, b = sig()
+            if validator then pcall(function() validator:FireServer(a, b) end) end
+            pcall(function() shootEv:FireServer(pos, { part }) end)
+            S.state = "Dragonstorm: shot at " .. tostring(part.Name)
+        end
+    end
+    Config.ShotFire = S.fire
 end
 
 function AFL.invDebug()
@@ -5818,72 +5957,108 @@ do
     end
     V.badEmber = setmetatable({}, { __mode = "k" })
 
-    -- Blaze Ember: Dragon Hunter quest (RF/DragonHunter). The quest text says what to do: kill Hydra Enforcers / Venomous Assailants / burn trees; embers drop as EmberTemplate
+    -- Blaze Ember (lógica do Quantum Onyx + Banana): Dragon Hunter fica no Dojo (5864, 1209, 808).
+    -- RequestQuest + Check devolvem o texto da missão (Defeat Hydra Enforcers / Venomous Assailants, ou Destroy trees).
+    -- Ao terminar aparece "Task completed!" -> pede a próxima. Os Blaze Ember caem como EmberTemplate (Part com Y > 10).
+    local DH_CF = CFrame.new(5864, 1209, 808)
+    local function taskDone()
+        local ok, r = pcall(function()
+            local n = Player.PlayerGui:FindFirstChild("Notifications")
+            if not n then return false end
+            for _, d in ipairs(n:GetDescendants()) do
+                if d:IsA("TextLabel") and (string.find(d.Text, "Task completed!", 1, true) or string.find(d.Text, "Head back to the Dojo", 1, true)) then return true end
+            end
+            return false
+        end)
+        return ok and r
+    end
+    function V.checkQuest()
+        netCall("RF/DragonHunter", { Context = "RequestQuest" })
+        local ok, r = netCall("RF/DragonHunter", { Context = "Check" })
+        if not (ok and type(r) == "table" and r.Text) then return nil, tostring(r) end
+        local t = tostring(r.Text)
+        if string.find(t, "Destroy", 1, true) or string.find(t, "Tree", 1, true) or string.find(t, "tree", 1, true) then return { kind = "tree", text = t } end
+        if string.find(t, "Venomous", 1, true) or string.find(t, "Assailant", 1, true) then return { kind = "kill", mob = "Venomous Assailant", text = t } end
+        if string.find(t, "Hydra", 1, true) or string.find(t, "Enforcer", 1, true) or string.find(t, "Defeat", 1, true) then return { kind = "kill", mob = "Hydra Enforcer", text = t } end
+        return { kind = "unknown", text = t }
+    end
+    V.treePts = { Vector3.new(5326, 1000.5, 441.52), Vector3.new(5344.88, 1000.5, 359.94), Vector3.new(5260.73, 1000.5, 345.5), Vector3.new(5237.99, 1000.5, 429.64) }
+
     function V.emberStep()
         State.Mode = "Auto Volcanic Magnet"
         local e, part = ember()
         if e then
             V.emberSince = V.emberSince or os.clock()
             State.Text = "Collecting Blaze Ember"
+            Diag.vulc = "Blaze Ember " .. invCount("Blaze Ember") .. "/15: collecting the drop"
             if os.clock() - V.emberSince > 15 then V.badEmber[e] = true; V.emberSince = nil; return true end
-            flyTo(part.CFrame)
+            flyTo(part.CFrame * CFrame.new(0, 3, 0))
             return true
         end
-        if V.emberSince then V.emberSince, V.questText = nil, nil end -- ember collected: ask the Dragon Hunter for the next task
-        local q = V.questText and string.lower(V.questText)
-        if not q then
-            local cf = npcCF("Dragon Hunter")
-            if not cf then Diag.vulc = "Dragon Hunter NPC not found (go to Hydra Island)"; return false end
-            local _, hrp = getChar()
-            if hrp and (hrp.Position - cf.Position).Magnitude > 8 then
+        if V.emberSince then V.emberSince, V.cur = nil, nil end -- ember collected: next task
+        if V.cur and os.clock() - (V.curAt or 0) > 4 and taskDone() then V.cur = nil end
+        local _, hrp = getChar()
+        if not V.cur or os.clock() - (V.curAt or 0) > 180 then
+            local cf = npcCF("Dragon Hunter") or DH_CF
+            if hrp and (hrp.Position - cf.Position).Magnitude > 12 then
                 State.Text = "Going to the Dragon Hunter"
+                Diag.vulc = "going to the Dragon Hunter (Dojo)"
                 flyTo(cf * CFrame.new(0, 4, 4))
                 return true
             end
-            local ok, r = netCall("RF/DragonHunter", { Context = "Check" })
-            if not (ok and type(r) == "table" and r.Text) then ok, r = netCall("RF/DragonHunter", { Context = "RequestQuest" }) end
-            if ok and type(r) == "table" and r.Text then
-                V.questText, V.qAt = tostring(r.Text), os.clock()
-                Diag.vulc = "Dragon Hunter quest: " .. V.questText
+            local q, err = V.checkQuest()
+            if q then
+                V.cur, V.curAt, V.unk = q, os.clock(), 0
+                Diag.vulc = "Dragon Hunter task: " .. q.text
             else
-                Diag.vulc = "Dragon Hunter gave no quest: " .. tostring(r)
+                Diag.vulc = "Dragon Hunter gave no task: " .. tostring(err)
                 task.wait(2)
             end
             return true
         end
-        if os.clock() - (V.qAt or 0) > 240 then V.questText = nil; return true end -- stale: ask again
-        Diag.vulc = "Blaze Ember (" .. invCount("Blaze Ember") .. "/15) | quest: " .. V.questText
-        if string.find(q, "hydra", 1, true) then
-            if killMob("Hydra Enforcer", "Hydra Enforcer") then return true end
-        elseif string.find(q, "venom", 1, true) then
-            if killMob("Venomous Assailant", "Venomous Assailant") then return true end
-        elseif string.find(q, "tree", 1, true) then
+        local q = V.cur
+        Diag.vulc = "Blaze Ember " .. invCount("Blaze Ember") .. "/15 | task: " .. q.text
+        if q.kind == "kill" then
+            if killMob(q.mob, q.mob) then return true end
+            State.Text = "Looking for " .. q.mob
+            flyTo(CFrame.new(5251.9, 60, 453.6))
+            return true
+        elseif q.kind == "tree" then
             State.Text = "Burning trees"
             local tree
             for _, d in ipairs(workspace:GetDescendants()) do
                 if d.Name == "Meshes/plant1_Icosphere" then
-                    local mdl = d:FindFirstAncestorWhichIsA("Model")
-                    if not (mdl and mdl:GetAttribute("AlreadyDestroyedClient")) then tree = d; break end
+                    local m = d:FindFirstAncestorWhichIsA("Model")
+                    if not (m and m:GetAttribute("AlreadyDestroyedClient")) then tree = d; break end
                 end
             end
             if tree then
-                local _, hrp = getChar()
                 if hrp and (hrp.Position - tree.Position).Magnitude > 40 then flyTo(CFrame.new(tree.Position + Vector3.new(0, 25, 0))); return true end
                 Aim.part, Aim.level = tree, false
                 skills()
                 return true
             end
-            flyTo(CFrame.new(5251.9, 17.2, 453.6))
+            -- sem árvore carregada: patrulha os 4 pontos (como o Quantum) soltando as skills
+            V.pi = ((math.floor(os.clock() / 2)) % #V.treePts) + 1
+            local p = V.treePts[V.pi]
+            flyTo(CFrame.new(p))
+            if hrp and (hrp.Position - p).Magnitude < 60 then skills() end
             return true
         end
-        V.qNone = (V.qNone or 0) + 1
-        if V.qNone > 20 then V.qNone, V.questText = 0, nil end
+        V.unk = (V.unk or 0) + 1
+        if V.unk > 20 then V.cur = nil end
         return true
     end
 
     -- Volcanic Magnet: 10 Scrap Metal (kill Jungle Pirates) + 15 Blaze Ember (Dragon Hunter) -> craft with RF/Craft
     function V.magnetStep()
-        if hasItem("Volcanic Magnet") then Diag.vulc = "already has the Volcanic Magnet: skipping to the island"; return false end
+        local haveMagnet = false
+        for _, c in ipairs({ Player.Backpack, Player.Character }) do
+            if c then for _, t in ipairs(c:GetChildren()) do
+                if t:IsA("Tool") and string.find(string.lower(t.Name), "volcanic magnet", 1, true) then haveMagnet = true end
+            end end
+        end
+        if haveMagnet then Diag.vulc = "already has the Volcanic Magnet: skipping to the island"; return false end
         local scrap, ember = invCount("Scrap Metal"), invCount("Blaze Ember")
         if scrap >= 10 and ember >= 15 then
             State.Mode, State.Text = "Auto Volcanic Magnet", "Crafting the Volcanic Magnet"
@@ -5899,7 +6074,7 @@ do
             State.Text = "Scrap Metal " .. scrap .. "/10"
             if killMob("Jungle Pirate", "Scrap Metal " .. scrap .. "/10") then return true end
             Diag.vulc = "Jungle Pirate spawn not found (Sea 3, Deep Forest / Jungle)"
-            return false
+            return true -- fica no passo do magnet em vez de sair navegando sem o magnet
         end
         return V.emberStep()
     end
@@ -6072,14 +6247,17 @@ local function addTab(key, title, icon)
 end
 addTab("Credits",  "Credits",         "heart")
 addTab("Discord",  "Discord",         "message-circle")
+addTab("Status",   "Status",          "activity")
 addTab("Script",   "Script Settings", "settings")
 addTab("Farm",     "Farm Settings",   "sliders-horizontal")
 addTab("Normal",   "Normal Farm",     "swords")
 addTab("Stack",    "Stack Farm",      "layers")
-addTab("Bosses",  "Bosses",          "skull")
+addTab("Mastery",  "Farm Mastery",    "trophy")
 addTab("Fruits",   "Fruits",          "apple")
+addTab("Bosses",  "Bosses",          "skull")
+addTab("Races",    "Races",           "users")
 addTab("Raid",     "Raid",            "shield")
-addTab("Dungeons", "Dungeons",        "door-open")
+addTab("Dungeons", "Dungeons",        "castle")
 addTab("Sea",      "Sea Events",      "waves")
 addTab("Vulcan",   "Vulcan",          "flame")
 addTab("ESP",      "ESP",             "eye")
@@ -6208,11 +6386,12 @@ function AFL.fogApply()
             if L.FogStart ~= 9e5 then L.FogStart = 9e5 end
             for _, a in ipairs(L:GetChildren()) do
                 if a:IsA("Atmosphere") then
-                    if not F.saved.atm[a] then F.saved.atm[a] = { a.Density, a.Haze } end -- inclui as criadas depois
+                    if not F.saved.atm[a] then F.saved.atm[a] = { a.Density, a.Haze }; pcall(function() F.saved.atmClone = F.saved.atmClone or {}; table.insert(F.saved.atmClone, a:Clone()) end) end
                     if a.Density ~= 0 then a.Density = 0 end
                     if a.Haze ~= 0 then a.Haze = 0 end
                     pcall(function() if a.Glare ~= 0 then a.Glare = 0 end end)
                     pcall(function() if a.Offset ~= 0 then a.Offset = 0 end end)
+                    pcall(function() a:Destroy() end)
                 end
             end
             local c = workspace.Terrain:FindFirstChildOfClass("Clouds")
@@ -6238,6 +6417,7 @@ function AFL.fogApply()
             for a, v in pairs(F.saved.atm) do
                 if a.Parent then a.Density, a.Haze = v[1], v[2] end
             end
+            for _, cl in ipairs(F.saved.atmClone or {}) do pcall(function() cl.Parent = L end) end
             for c, was in pairs(F.saved.clouds) do
                 if c.Parent then c.Enabled = was end
             end
@@ -6369,10 +6549,6 @@ do
 end
 
 Tabs.Farm:AddSection("General Farm Settings")
-Tabs.Farm:AddToggle("AutoV3", { Title = "Auto Activate Race V3", Default = Config.AutoV3 })
-    :OnChanged(function(v) Config.AutoV3 = v; persist() end)
-Tabs.Farm:AddToggle("AutoV4", { Title = "Auto Activate Race V4", Default = Config.AutoV4 })
-    :OnChanged(function(v) Config.AutoV4 = v; persist() end)
 do
     local bt = Tabs.Farm:AddToggle("AutoBuso", { Title = "Auto Buso", Description = "Always on", Default = true })
     bt:OnChanged(function(v)
@@ -6443,17 +6619,62 @@ do
         if cur and cur ~= "" and not seen[cur] then vals[#vals + 1] = cur end
         return vals
     end
+    local busy, fillDefault, pt = false, nil, nil
+    if Config.PrioDefault == nil then
+        local any = false
+        for _, v in ipairs(Config.Prio) do if v and v ~= "" and v ~= NONE then any = true end end
+        Config.PrioDefault = not any
+    end
+    local slots = math.max(5, #Config.Prio)
     local function addSlot(i)
         Config.Prio[i] = Config.Prio[i] or NONE
         local dd = Tabs.Farm:AddDropdown("Prio" .. i, {
             Title = "Priority " .. i, Values = valuesFor(i), Default = Config.Prio[i],
             Description = (i == 1) and "Runs first. Lists the functions you have turned on (quests excluded)." or nil,
         })
-        dd:OnChanged(function(v) Config.Prio[i] = v or NONE; persist() end)
+        dd:OnChanged(function(v)
+            if busy then return end
+            v = v or NONE
+            Config.Prio[i] = v
+            busy = true
+            if Config.PrioDefault then Config.PrioDefault = false; if pt then pcall(function() pt:SetValue(false) end) end end
+            -- sem repetir a mesma função em dois slots (evita conflito): a antiga vira None
+            if v ~= NONE then
+                for j, d2 in pairs(dds) do
+                    if j ~= i and Config.Prio[j] == v then Config.Prio[j] = NONE; pcall(function() d2:SetValue(NONE) end) end
+                end
+            end
+            busy = false
+            persist()
+        end)
         dds[i] = dd
     end
-    local slots = math.max(5, #Config.Prio)
+    pt = Tabs.Farm:AddToggle("PrioDefault", { Title = "Default Priorities (recommended)",
+        Description = "Uses the script's own order, built so functions never fight each other: Dungeon > Raid > Fruit > Mirage > Vulcan > Sea > Pirate > Elite > Factory > Chest > Boss > Awk Boss > Tyrant > Dough Prince > Normal Farm. Change any slot below to make your own order (this turns off)",
+        Default = Config.PrioDefault and true or false })
+    pt:OnChanged(function(v)
+        if busy then return end
+        Config.PrioDefault = v and true or false
+        if v then fillDefault() end
+        persist()
+    end)
+    Tabs.Farm:AddButton({ Title = "Reset to default priorities", Description = "Goes back to the script's recommended order",
+        Callback = function() if pt then pt:SetValue(true) end; fillDefault() end })
+    local ordInfo = Tabs.Farm:AddParagraph({ Title = "Current order", Content = "..." })
     for i = 1, slots do addSlot(i) end
+    fillDefault = function()
+        busy = true
+        local list = enabledLabels()
+        while #dds < #list do slots += 1; addSlot(slots) end
+        for i, dd in ipairs(dds) do
+            local v = list[i] or NONE
+            Config.Prio[i] = v
+            pcall(function() dd:SetValue(v) end)
+        end
+        busy = false
+        persist()
+    end
+    if Config.PrioDefault then task.defer(fillDefault) end
     Tabs.Farm:AddButton({ Title = "Add new priority", Description = "Creates one more priority slot (no limit)",
         Callback = function() slots += 1; addSlot(slots) end })
     task.spawn(function()
@@ -6464,7 +6685,19 @@ do
             if sig ~= last then
                 last = sig
                 for i, dd in ipairs(dds) do pcall(function() dd:SetValues(valuesFor(i)) end) end
+                if Config.PrioDefault then fillDefault() end
             end
+            pcall(function()
+                local parts, n = {}, 0
+                for _, key in ipairs(AFL.prioOrder()) do
+                    local f = AFL.feat[key]
+                    if f and f.on() then
+                        local names = f.labels and f.labels() or { f.hidden and (key == "Normal" and "Normal Farm" or f.label) or f.label }
+                        for _, nm in ipairs(names) do n += 1; parts[#parts + 1] = n .. ") " .. tostring(nm) end
+                    end
+                end
+                ordInfo:SetDesc((Config.PrioDefault and "Default order" or "Custom order") .. ":\n" .. table.concat(parts, "\n"))
+            end)
         end
     end)
 end
@@ -6814,11 +7047,11 @@ do
     opt("RoughTp", "Teleport Boat Other CFrame if Rough Sea", "If Rough Sea is detected, teleports the boat to another spot", "RoughTp")
     opt("TweenUntil", "Tween Until Have Sea Event", "Detects events from far away (3000 studs). Off: only up to 450 studs", "TweenUntil", true)
     opt("Back10k", "Will Back When over 10km", "Goes back to the starting point after 10,000 studs", "Back10k")
-    opt("UseDS", "Use Dragonstorm For Sea Event", "Only for Ship, Shark, Piranha and Terrorshark (M1)", "UseDS")
-    opt("UseSG", "Use Click M1 Skull Guitar For Sea Event", "Only for Ship and Sea Beast (M1)", "UseSG")
+    opt("UseDS", "Use Dragonstorm For Sea Event", "Ship, Shark, Piranha e Terrorshark: a Dragonstorm atira sozinha, mirando no alvo (sem clicar na tela), mesmo com Melee selecionado", "UseDS")
+    opt("UseSG", "Use Click M1 Skull Guitar For Sea Event", "Ship e Sea Beast: a Skull Guitar atira sozinha no alvo, mesmo com Melee selecionado", "UseSG")
     opt("AutoChangeDS", "Auto Change Dragonstorm With Skull Guitar", "Dragonstorm on boats/fish/Terrorshark and Skull Guitar on the Sea Beast", "AutoChangeDS")
-    opt("ChangeDSBoat", "Auto Change Dragonstorm When Kill Boat", "Switches to the Dragonstorm when killing boats (Ship)", "ChangeDSBoat")
-    opt("UseM1Fruit", "Use Click M1 Fruit For Sea Event", "Hits only with the fruit M1, ignores the chosen skills", "UseM1Fruit")
+    opt("ChangeDSBoat", "Auto Change Dragonstorm When Kill Boat", "Usa a Dragonstorm só ao matar barcos (Ship); o resto segue as outras opções", "ChangeDSBoat")
+    opt("UseM1Fruit", "Use Click M1 Fruit For Sea Event", "Bate com o M1 da fruta mirando no alvo, mesmo com Melee selecionado; ignora as skills escolhidas", "UseM1Fruit")
     opt("ResetBuy", "Reset Character Buy Boat", "Resets the character when the boat dies (no creature to kill) or the purchase fails", "ResetBuy", true)
 
     -- ===== Mirage =====
@@ -6867,6 +7100,17 @@ do
         Title = "Pay Raid only -1M Fruits",
         Description = "With Fruit: only fruits below $1M (never Legendary, Mythical or fruit skins)", Default = Config.PayOnly1M and true or false,
     }):OnChanged(function(v) saveKey("PayOnly1M", v) end)
+    T:AddToggle("AutoAwaken", { Title = "Auto Awaken", Description = "Awakens the fruit skills with the Awakener when you have the fragments (Quantum: Awakener Check + Awaken)", Default = Config.AutoAwaken and true or false })
+        :OnChanged(function(v) Config.AutoAwaken = v; persist() end)
+    task.spawn(function()
+        while Alive do
+            if Config.AutoAwaken then
+                pcall(invoke, "Awakener", "Check")
+                pcall(invoke, "Awakener", "Awaken")
+            end
+            task.wait(1.5)
+        end
+    end)
     T:AddSection("Raid Status")
     local info = T:AddParagraph({ Title = "Raid", Content = "Checking..." })
     task.spawn(function()
@@ -6922,6 +7166,782 @@ do
     tg("VulcBone", "Auto Collect Bone", "Collects the bones that fall around the volcano")
 end
 
+-- ---------- Races ----------
+-- Bases: Banana + Quantum Onyx (Ghoul/Cyborg/V2/V3/V4) + NightRace (Ectoplasm, Fist of Darkness, Ghost Ship) + 6V3PullLever
+-- + Conte_do_colado (Cursed Captain join API). Um recurso por vez, em ordem: Reroll > Ghoul > Cyborg > V2 > V3 > V4 Lever.
+;(function()
+    local T = Tabs.Races
+    local RS = game:GetService("ReplicatedStorage")
+    local HttpSvc = game:GetService("HttpService")
+    local TeleportSvc = game:GetService("TeleportService")
+    local PlayersSvc = game:GetService("Players")
+    local R = {}
+    AFL.Race = R
+    R.status = "Idle"
+    local function cfgv(k, d) if Config[k] == nil then Config[k] = d end end
+    cfgv("RaceReroll", false); cfgv("RaceTarget", "Ghoul"); cfgv("RaceGhoul", false); cfgv("RaceGhoulHop", false)
+    cfgv("RaceCyborg", false); cfgv("RaceV2", false); cfgv("RaceV3", false); cfgv("RaceV3Pvp", false)
+    cfgv("RaceLever", false); cfgv("RaceGear", false); cfgv("RaceV4Auto", false)
+
+    local function note(t) R.status = t; State.Mode, State.Text = "Races", t; Diag.race = t end
+    local function inv(...) local ok, res = invoke(...); if ok then return res end return nil end
+    local function pdata() return Player:FindFirstChild("Data") end
+    local function raceVal() local d = pdata(); local r = d and d:FindFirstChild("Race"); return r and tostring(r.Value) or "?" end
+    local function dval(n) local d = pdata(); local v = d and d:FindFirstChild(n); return v and tonumber(v.Value) or 0 end
+    local function evolved() local d = pdata(); local r = d and d:FindFirstChild("Race"); return r ~= nil and r:FindFirstChild("Evolved") ~= nil end
+    local function pos3(x, y, z) return Vector3.new(x, y, z) end
+    local function near(v, r) local _, hrp = getChar(); return hrp and (hrp.Position - v).Magnitude <= (r or 8) end
+    local function goTo(v, up) flyTo(CFrame.new(v.X, v.Y + (up or 0), v.Z)) end
+    local function hasTool(n) return findToolByName(string.lower(n)) ~= nil end
+    local function equipByName(n)
+        local t, eq = findToolByName(string.lower(n))
+        if t and not eq then local _, _, hum = getChar(); if hum then hum:EquipTool(t) end end
+        return t
+    end
+    local function fire(cd) if cd and type(fireclickdetector) == "function" then pcall(fireclickdetector, cd) end end
+
+    -- ===== servidor com Cursed Captain (API do Conte_do_colado) =====
+    local API_URL, SECRET = "https://api.quantumonyx.cc", "QnTmOnyX"
+    local ALPHA = "kQ9mZ2xW7nR4vB1jY6tF3hD8pL5cG0sA"
+    local function decodeJobId(arg)
+        local s = arg:gsub("^%.", ""):gsub("%.$", "")
+        local t, n = {}, 0
+        for i = 1, #s do n += 1; if n % 5 ~= 0 then t[#t + 1] = s:sub(i, i) end end
+        local s2 = table.concat(t)
+        local out, a, b = {}, 1, 1
+        local function f3(x, y) return (x - SECRET:byte((y - 1) % #SECRET + 1) - y) % 32 end
+        while a <= #s2 do
+            local i1, i2 = ALPHA:find(s2:sub(a, a), 1, true), ALPHA:find(s2:sub(a + 1, a + 1), 1, true)
+            if not i1 or not i2 then return "" end
+            out[#out + 1] = string.char(f3(i1 - 1, b) + f3(i2 - 1, b + 100) * 32)
+            a += 2; b += 1
+        end
+        return table.concat(out)
+    end
+    local reqf = (syn and syn.request) or http_request or (http and http.request) or request or httprequest
+    local joining, lastJoin = false, 0
+    function R.joinBoss(bossName)
+        if joining or os.clock() - lastJoin < 8 or not reqf then return false end
+        joining, lastJoin = true, os.clock()
+        task.spawn(function()
+            local ok = pcall(function()
+                local res = reqf({ Url = API_URL .. "/api/logs/" .. bossName:lower(), Method = "GET", Headers = { ["Content-Type"] = "application/json" } })
+                if not res or res.StatusCode ~= 200 then error("api") end
+                local dec = HttpSvc:JSONDecode(res.Body)
+                local entries = dec and dec[bossName:lower()]
+                if not entries or #entries == 0 then error("empty") end
+                local ids = {}
+                for i = #entries, 1, -1 do
+                    local e = entries[i]
+                    if e.jobId and e.jobId ~= "" and (not e.placeId or tostring(e.placeId) == tostring(game.PlaceId)) then
+                        local j = decodeJobId(e.jobId)
+                        if j ~= "" and j ~= game.JobId and not table.find(ids, j) then ids[#ids + 1] = j end
+                    end
+                end
+                if #ids == 0 then error("none") end
+                local cur, browser = game.JobId, RS:FindFirstChild("__ServerBrowser")
+                for i, j in ipairs(ids) do
+                    if game.JobId ~= cur or not Alive then break end
+                    note(string.format("Hopping to %s server (%d/%d)", bossName, i, #ids))
+                    pcall(saveAll)
+                    pcall(function()
+                        if browser then browser:InvokeServer("teleport", j)
+                        else TeleportSvc:TeleportToPlaceInstance(game.PlaceId, j, Player) end
+                    end)
+                    task.wait(6)
+                end
+            end)
+            if not ok then note("No " .. bossName .. " server found in the API (will retry)") end
+            joining = false
+        end)
+        return true
+    end
+
+    -- ===== Ghost Ship =====
+    local SHIP = pos3(923.213, 125.39765, 32852.832)
+    local SHIP_MOBS = { "Ship Deckhand", "Ship Engineer", "Ship Steward", "Ship Officer" }
+    local enterAt = 0
+    local function insideShip() local _, hrp = getChar(); return hrp and (hrp.Position - SHIP).Magnitude <= 1000 end
+    local function enterShip()
+        if insideShip() then return true end
+        if os.clock() - enterAt > 4 then enterAt = os.clock(); inv("requestEntrance", SHIP) end
+        return false
+    end
+    local function fightNames(names, label)
+        local e = findEnemy(names)
+        if e then note(label .. ": " .. e.Name); fightEnemy(e, { e.Name }, true); return true end
+        return false
+    end
+
+    -- ===== Reroll (Banana/NightRace): BlackbeardReward Reroll 1 -> 2 (3000 fragments) =====
+    local lastReroll = 0
+    local function stepReroll()
+        if not Config.RaceReroll then return false end
+        local want = tostring(Config.RaceTarget)
+        if raceVal() == want then note("Reroll: already " .. want); return false end
+        if dval("Fragments") < 3000 then note("Reroll: need 3000 fragments"); return false end
+        if os.clock() - lastReroll < 3 then return true end
+        lastReroll = os.clock()
+        note("Rerolling race (now " .. raceVal() .. " -> " .. want .. ")")
+        inv("BlackbeardReward", "Reroll", "1")
+        inv("BlackbeardReward", "Reroll", "2")
+        return true
+    end
+
+    local function toSea2()
+        if getSea() == 2 then return true end
+        note("Traveling to the Second Sea")
+        if os.clock() - (R.travelAt or 0) > 15 then R.travelAt = os.clock(); inv("TravelDressrosa") end
+        return false
+    end
+
+    -- ===== Ghoul: 100 Ectoplasm + Hellfire Torch (Cursed Captain) -> Ectoplasm Buy 4 =====
+    local BUY_POS = pos3(921, 125, 33453)
+    local lastChange = 0
+    local function stepGhoul()
+        if not Config.RaceGhoul or raceVal() == "Ghoul" then return false end
+        if not toSea2() then return true end
+        if os.clock() - lastChange > 12 then lastChange = os.clock(); inv("Ectoplasm", "Change", 4) end
+        local ecto = invCount("Ectoplasm")
+        if ecto < 100 then
+            if not enterShip() then note("Ghoul: entering the Ghost Ship"); return true end
+            if fightNames(SHIP_MOBS, string.format("Ghoul: Ectoplasm %d/100", ecto)) then return true end
+            note("Ghoul: waiting for ship mobs"); goTo(SHIP, 30); return true
+        end
+        if hasTool("Hellfire Torch") then
+            if near(BUY_POS, 10) then
+                note("Ghoul: buying the race")
+                inv("Ectoplasm", "BuyCheck", 4); task.wait(0.2); inv("Ectoplasm", "Buy", 4)
+            else
+                note("Ghoul: going to the Ectoplasm shop"); goTo(BUY_POS)
+            end
+            return true
+        end
+        local cap = findEnemy({ "Cursed Captain" })
+        if cap then
+            if not insideShip() and not enterShip() then note("Ghoul: entering the Ghost Ship"); return true end
+            note("Ghoul: killing Cursed Captain"); fightEnemy(cap, { cap.Name }, false); return true
+        end
+        if Config.RaceGhoulHop then
+            note("Ghoul: no Cursed Captain here, searching a server")
+            R.joinBoss("CursedCaptain")
+            return true
+        end
+        note("Ghoul: Cursed Captain is not in this server (turn on Auto Ghoul Server Hop)")
+        return false
+    end
+
+    -- ===== Cyborg: 2500 frags, Fist of Darkness / Core Brain / Microchip / Order =====
+    local MACHINE = pos3(-5544, 229, -5938)
+    local function machine()
+        local m = workspace:FindFirstChild("Map"); local ci = m and m:FindFirstChild("CircleIsland")
+        local rs = ci and ci:FindFirstChild("RaidSummon"); local b = rs and rs:FindFirstChild("Button")
+        local mn = b and b:FindFirstChild("Main")
+        return mn, mn and mn:FindFirstChildOfClass("ClickDetector"), ci
+    end
+    local function useMachine(label)
+        local _, cd = machine()
+        if not near(MACHINE, 8) then note(label .. ": going to the machine"); goTo(MACHINE); return true end
+        fire(cd); task.wait(0.6); return true
+    end
+    local function labUnlocked(ci)
+        local d = ci and ci:FindFirstChild("SecretLabDoors"); local c = d and d:FindFirstChild("colormodel")
+        return c and c.Color.G > c.Color.R
+    end
+    local function stepCyborg()
+        if not Config.RaceCyborg or raceVal() == "Cyborg" then return false end
+        if not toSea2() then return true end
+        local chk = inv("CyborgTrainer", "Check")
+        local mn, _, ci = machine()
+        if chk == 1 or chk == true or (mn and not mn.CanCollide) then
+            if dval("Fragments") >= 2500 then
+                note("Cyborg: buying the race"); inv("CyborgTrainer", "Buy"); task.wait(1); return true
+            end
+            note("Cyborg: need 2500 fragments"); return false
+        end
+        if hasTool("Core Brain") then equipByName("Core Brain"); return useMachine("Cyborg (Core Brain)") end
+        local order = findEnemy({ "Order" })
+        if order then note("Cyborg: killing Order"); fightEnemy(order, { "Order" }, false); return true end
+        if hasTool("Microchip") then equipByName("Microchip"); return useMachine("Cyborg (Microchip)") end
+        if not labUnlocked(ci) then
+            if hasTool("Fist of Darkness") then equipByName("Fist of Darkness"); return useMachine("Cyborg (Fist of Darkness)") end
+            local e = AFL.feat and AFL.feat.Chest
+            if e then
+                note("Cyborg: farming chests for the Fist of Darkness")
+                local ok, busy = pcall(e.run)
+                return (ok and busy) and true or false
+            end
+            note("Cyborg: need the Fist of Darkness"); return false
+        end
+        if dval("Fragments") >= 1000 then
+            note("Cyborg: buying a Microchip"); inv("BlackbeardReward", "Microchip", "2"); task.wait(1); return true
+        end
+        note("Cyborg: need 1000 fragments for the Microchip"); return false
+    end
+
+    -- ===== V2 (Alchemist, Second Sea) =====
+    local ALCH = pos3(-2777, 73, -3570)
+    local function flowerPart(n) local p = workspace:FindFirstChild(n); return (p and p:IsA("BasePart") and p.Transparency ~= 1) and p or nil end
+    local function stepV2()
+        if not Config.RaceV2 or evolved() then return false end
+        if raceVal() == "Draco" then note("V2: Draco cannot use the Alchemist"); return false end
+        if not toSea2() then return true end
+        if dval("Beli") < 500000 then note("V2: need 500,000 Beli"); return false end
+        local a = inv("Alchemist", "1")
+        if a == 0 or a == 2 then
+            if near(ALCH, 6) then note("V2: talking to the Alchemist"); inv("Alchemist", a == 0 and "2" or "3"); task.wait(1)
+            else note("V2: going to the Alchemist"); goTo(ALCH) end
+            return true
+        elseif a == 1 then
+            for i = 1, 2 do
+                local n = "Flower " .. i
+                if not hasTool(n) then
+                    local p = flowerPart("Flower" .. i)
+                    if p then note("V2: collecting " .. n); flyTo(p.CFrame); return true end
+                end
+            end
+            if not hasTool("Flower 3") then
+                if not insideShip() and not enterShip() then note("V2: entering the Ghost Ship (yellow flower)"); return true end
+                if fightNames(SHIP_MOBS, "V2: yellow flower") then return true end
+            end
+            if not (hasTool("Flower 1") and hasTool("Flower 2") and hasTool("Flower 3")) then
+                note("V2: waiting for night (flowers)"); goTo(pos3(-382, 73, 290)); return true
+            end
+        end
+        return false
+    end
+
+    -- ===== V3 (Wenlocktoad) =====
+    local WEN = pos3(-1992, 125, -73)
+    local function pvpTarget()
+        local _, hrp = getChar(); if not hrp then return end
+        local best, bd, mylvl = nil, math.huge, dval("Level")
+        local sky = raceVal() == "Skypiea"
+        for _, pl in ipairs(PlayersSvc:GetPlayers()) do
+            if pl ~= Player and not pl:GetAttribute("IslandRaiding") and not pl:GetAttribute("PvpDisabled") then
+                local pd = pl:FindFirstChild("Data")
+                local ok = true
+                if sky then local r = pd and pd:FindFirstChild("Race"); ok = r and tostring(r.Value) == "Skypiea" end
+                local lv = pd and pd:FindFirstChild("Level")
+                if ok and lv and math.abs(lv.Value - mylvl) < 500 then
+                    local c = pl.Character; local h = c and c:FindFirstChild("HumanoidRootPart"); local hu = c and c:FindFirstChildOfClass("Humanoid")
+                    if h and hu and hu.Health > 0 then
+                        local d = (h.Position - hrp.Position).Magnitude
+                        if d < bd then best, bd = c, d end
+                    end
+                end
+            end
+        end
+        return best
+    end
+    local function stepV3()
+        if not Config.RaceV3 or not evolved() then return false end
+        if inv("Wenlocktoad") ~= nil then note("V3: already unlocked"); return false end
+        if dval("Level") < 1000 then note("V3: need level 1000"); return false end
+        if dval("Beli") < 2000000 then note("V3: need 2,000,000 Beli"); return false end
+        if not toSea2() then return true end
+        local w = inv("Wenlocktoad", "1")
+        if w == 0 or w == 2 then
+            if near(WEN, 6) then note("V3: talking to Wenlocktoad"); inv("Wenlocktoad", w == 0 and "2" or "3"); task.wait(1)
+            else note("V3: going to Wenlocktoad"); goTo(WEN) end
+            return true
+        elseif w == 1 then
+            local race = raceVal()
+            if race == "Mink" then
+                local e = AFL.feat and AFL.feat.Chest
+                if e then
+                    note("V3 (Mink): opening chests")
+                    local ok, busy = pcall(e.run)
+                    return (ok and busy) and true or false
+                end
+            elseif race == "Human" then
+                if fightNames({ "Diamond", "Orbitus", "Jeremy" }, "V3 (Human)") then return true end
+                note("V3 (Human): Diamond / Orbitus / Jeremy not spawned"); goTo(pos3(-382, 73, 290)); return true
+            elseif race == "Ghoul" or race == "Skypiea" then
+                if not Config.RaceV3Pvp then note("V3 (" .. race .. "): needs PvP, turn on 'Allow PvP for V3'"); return false end
+                local c = pvpTarget()
+                if c then note("V3 (" .. race .. "): hunting " .. c.Name); fightEnemy(c, { c.Name }, false); return true end
+                note("V3 (" .. race .. "): no valid player found"); return false
+            else
+                note("V3 (" .. race .. "): no automation for this race yet"); return false
+            end
+        end
+        return false
+    end
+
+    -- ===== V4: Pull Lever (Fully) + Gear + Activate =====
+    local LEVER, LDOOR, GREAT = pos3(28575, 14937, 72), pos3(28610, 14897, 106), pos3(2956, 2282, -7216)
+    local function stepLever()
+        if not Config.RaceLever then return false end
+        local p = inv("RaceV4Progress", "Check")
+        if p == 1 then note("V4: beginning"); inv("RaceV4Progress", "Begin"); return true end
+        if p == 2 then
+            if not near(LDOOR, 500) then note("V4: entering the temple"); inv("requestEntrance", pos3(28283, 14897, 105)); goTo(LDOOR); return true end
+            if near(LDOOR, 20) then
+                task.wait(1); inv("RaceV4Progress", "TeleportBack"); task.wait(0.5); goTo(GREAT); inv("RaceV4Progress", "Teleport")
+            else goTo(LDOOR) end
+            note("V4: progressing"); return true
+        end
+        if p == 3 then note("V4: continuing"); inv("RaceV4Progress", "Continue"); return true end
+        local map = workspace:FindFirstChild("Map")
+        local mystic = map and map:FindFirstChild("MysticIsland")
+        local door = inv("CheckTempleDoor")
+        local light = game:GetService("Lighting")
+        if mystic and not door then
+            local ct = light.ClockTime
+            if ct > 16 or ct < 5 then
+                local c = mystic:FindFirstChild("Center")
+                if c then
+                    local top = pos3(c.Position.X, 500, c.Position.Z)
+                    local gear
+                    for _, ch in ipairs(mystic:GetChildren()) do if ch.Name == "Part" and ch:IsA("MeshPart") and ch.Transparency == 0 then gear = ch end end
+                    if gear then note("V4: going to the Blue Gear"); flyTo(gear.CFrame)
+                    else
+                        note("V4: looking at the moon"); goTo(top)
+                        if near(top, 200) then
+                            pcall(function()
+                                local cam = workspace.CurrentCamera
+                                cam.CFrame = CFrame.lookAt(cam.CFrame.Position, cam.CFrame.Position + light:GetMoonDirection() * 100)
+                            end)
+                            task.wait(0.5)
+                            pcall(function() RS.Remotes.CommE:FireServer("ActivateAbility") end)
+                        end
+                    end
+                    return true
+                end
+            end
+            note("V4: waiting for night (Mirage)"); return false
+        elseif door then
+            if not near(LEVER, 10) then note("V4: going to the lever"); goTo(LEVER); return true end
+            pcall(function() fireproximityprompt(map["Temple of Time"].Lever.Prompt.ProximityPrompt, math.huge) end)
+            note("V4: pulling the lever"); return true
+        end
+        note("V4: Mirage Island not found"); return false
+    end
+
+    -- ===== Gear automático (Ancient Clock) =====
+    local gearAt = 0
+    local GEARS = { {}, { "Gear1" }, { "Gear2", "Omega" }, { "Gear2", "Alpha" }, { "Gear2", true }, { "Gear2", false }, { "Gear3", "Alpha" }, { "Gear3", "Omega" },
+        { "Gear3", true }, { "Gear3", false }, { "Gear4", "Alpha" }, { "Gear4", true }, { "Gear4", false }, { "Gear5", "Default" }, { "Gear5", true }, { "Gear5", false } }
+    local function chooseGear()
+        if os.clock() - gearAt < 20 then return end
+        gearAt = os.clock()
+        local res = inv("TempleClock", "Check")
+        if type(res) == "table" and res.HadPoint ~= true then return end
+        local g4 = (type(res) == "table" and res.RaceDetails and res.RaceDetails.B == 2) and "Omega" or "Alpha"
+        for _, a in ipairs(GEARS) do
+            local args = { "TempleClock", "SpendPoint", table.unpack(a) }
+            if a[1] == "Gear4" and a[2] == "Alpha" then args[4] = g4 end
+            pcall(invoke, table.unpack(args))
+        end
+    end
+    -- ativa a V4 quando a energia está cheia (Quantum)
+    local function activateV4()
+        local c = Player.Character
+        local en, tr = c and c:FindFirstChild("RaceEnergy"), c and c:FindFirstChild("RaceTransformed")
+        if en and tr and en.Value >= 1 and not tr.Value then
+            pcall(function() Player.Backpack.Awakening.RemoteFunction:InvokeServer({ true }) end)
+            return true
+        end
+    end
+    function R.activateNow() return activateV4() end
+
+    -- ===== passo principal (chamado pelo loop em ordem de prioridade) =====
+    function R.step()
+        if getChar() == nil then return false end
+        local order = { stepReroll, stepGhoul, stepCyborg, stepV2, stepV3, stepLever }
+        for _, f in ipairs(order) do
+            local ok, busy = pcall(f)
+            if not ok then AFL.logErr("Races", busy)
+            elseif busy then return true end
+        end
+        return false
+    end
+    function R.listed()
+        return Config.RaceReroll or Config.RaceGhoul or Config.RaceCyborg or Config.RaceV2 or Config.RaceV3 or Config.RaceLever
+    end
+    task.spawn(function()
+        while Alive do
+            task.wait(2)
+            if Config.RaceGear then pcall(chooseGear) end
+            if Config.RaceV4Auto then pcall(activateV4) end
+        end
+    end)
+
+    -- ===== UI =====
+    local function tog(id, title, desc)
+        T:AddToggle(id, { Title = title, Description = desc, Default = Config[id] and true or false }):OnChanged(function(v) Config[id] = v; persist() end)
+    end
+    T:AddSection("Race Info")
+    local info = T:AddParagraph({ Title = "Race", Content = "Checking..." })
+    local info2 = T:AddParagraph({ Title = "Resources", Content = "Checking..." })
+    task.spawn(function()
+        while Alive do
+            pcall(function()
+                local c = Player.Character
+                local en, tr = c and c:FindFirstChild("RaceEnergy"), c and c:FindFirstChild("RaceTransformed")
+                info:SetDesc(string.format("%s (%s) | V4 energy: %s | Transformed: %s\nStatus: %s", raceVal(), evolved() and "V2+" or "V1",
+                    en and string.format("%d%%", math.floor(en.Value * 100)) or "-", tr and tostring(tr.Value) or "-", R.status))
+                info2:SetDesc(string.format("Fragments: %d | Beli: %d | Level: %d | Ectoplasm: %d", dval("Fragments"), dval("Beli"), dval("Level"), invCount("Ectoplasm")))
+            end)
+            task.wait(1.5)
+        end
+    end)
+
+    T:AddSection("Ghoul")
+    tog("RaceGhoul", "Auto Ghoul", "100 Ectoplasm (Ghost Ship mobs) + Hellfire Torch (Cursed Captain), then buys Ghoul. Second Sea")
+    tog("RaceGhoulHop", "Auto Ghoul Server Hop", "No Cursed Captain here? Joins a server that has one (Quantum API)")
+
+    T:AddSection("Cyborg")
+    tog("RaceCyborg", "Auto Cyborg", "Fist of Darkness (chests) > Order boss > Microchip > Core Brain > buys Cyborg (2500 fragments)")
+
+    T:AddSection("Upgrade Race")
+    tog("RaceV2", "Auto Upgrade Race V2", "Alchemist quest: 3 flowers (night), needs 500k Beli. Second Sea")
+    tog("RaceV3", "Auto Upgrade Race V3", "Wenlocktoad quest (level 1000, 2M Beli). Mink/Human automatic; Ghoul/Sky need PvP")
+    tog("RaceV3Pvp", "Allow PvP for V3", "Ghoul / Skypiea V3 require hunting players")
+
+    T:AddSection("Reroll Race")
+    local RACES = { "Human", "Skypiea", "Fishman", "Mink", "Cyborg", "Ghoul" }
+    local ri = 1; for i, n in ipairs(RACES) do if n == Config.RaceTarget then ri = i end end
+    T:AddDropdown("RaceTarget", { Title = "Select Race", Description = "Race you want (each reroll costs 3000 fragments)", Values = RACES, Default = ri })
+        :OnChanged(function(v) Config.RaceTarget = v; persist() end)
+    tog("RaceReroll", "Auto Reroll Race", "Rerolls until you get the selected race")
+
+    T:AddSection("Race V4")
+    T:AddToggle("AutoV3", { Title = "Auto Activate Race V3", Default = Config.AutoV3 }):OnChanged(function(v) Config.AutoV3 = v; persist() end)
+    T:AddToggle("AutoV4", { Title = "Auto Activate Race V4", Default = Config.AutoV4 }):OnChanged(function(v) Config.AutoV4 = v; persist() end)
+    tog("RaceV4Auto", "Auto Activate V4 (energy full)", "Uses the awakening as soon as the race energy is full")
+    tog("RaceLever", "Auto Pull Lever (Fully)", "Finds the Blue Gear on Mirage, opens the temple and pulls the lever")
+    tog("RaceGear", "Auto Choose Gear", "Spends the gear point in the Ancient Clock after the trial")
+    T:AddButton({ Title = "Activate V4 Now", Description = "Only works with the energy full", Callback = function() R.activateNow() end })
+    local AREAS = {
+        { "Race Door", nil }, { "Top of Great Tree", pos3(2948, 2282, -7214) }, { "Temple of Time", pos3(28286, 14895, 103) },
+        { "Ancient One", pos3(28982, 14888, -120) }, { "Lever Pull", LEVER }, { "Safe Zone", pos3(28273, 14897, 157) },
+        { "PvP Zone", pos3(28767, 14967, -164) }, { "Clock", pos3(29552, 15069, -86) } }
+    local DOORS = { Fishman = pos3(28224, 14889, -210), Human = pos3(29237, 14889, -207), Cyborg = pos3(28492, 14901, -426),
+        Skypiea = pos3(28967, 14918, 234), Ghoul = pos3(28672, 14889, 454), Mink = pos3(29020, 14889, -379) }
+    T:AddSection("Trial Areas")
+    for _, a in ipairs(AREAS) do
+        T:AddButton({ Title = "Teleport: " .. a[1], Callback = function()
+            local p = a[2] or DOORS[raceVal()]
+            if p then flyTo(CFrame.new(p)) end
+        end })
+    end
+end)()
+-- ---------- Webhook (Rare Boss) ----------
+-- Base: MoonHub_Webhook. Avisa no Discord quando um boss raro existe no servidor (1x por servidor/boss). Envia só nome do boss, contagem de players, PlaceId e JobId.
+;(function()
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+local ENV = (getgenv and getgenv()) or _G
+if type(ENV.MoonHubWebhookShutdown) == "function" then pcall(ENV.MoonHubWebhookShutdown) end
+local W = {
+	enabled = true,
+	url = "https://discord.com/api/webhooks/1559423109226831903/Upfx0wvX60BFqs6qbMRNRIARmP_CxiUftnh99Pw7vrrqKWq7kEdsMpIyyvLOkgITTMSp",
+
+	title = "MoonHub Wbhooks",
+	-- 0x000001 = barra lateral preta (0x000000 o Discord trata como "sem cor" e mostra cinza)
+	color = 0x000001,
+	thumbnailUrl = "",              -- link de imagem (png/jpg) no canto direito do embed; vazio = sem imagem
+	footerName = "MoonHub",         -- rodapé: "MoonHub | 09/07/2026 02:49"
+	dateFormat = "%d/%m/%Y %H:%M",  -- dia/mês/ano hora:minuto (horário do seu aparelho)
+
+	scanInterval = 1,      -- segundos entre cada checagem de boss
+	rearmDelay = 30,       -- segundos sem ver o boss para avisar de novo no próximo spawn
+	deathCooldown = 8,     -- segundos ignorando o modelo do ReplicatedStorage depois que o boss morre
+	mobileCopyMessage = false, -- true = manda também o JobId sozinho numa 2ª mensagem
+
+	emojis = {
+		moon = "<:MoonHub:1559425258325413938>",
+		boss = "<:box:1559429722029686805>",
+		players = "<:User:1559429896026202193>",
+		placeId = "<:sla:1559430582642020465>",
+		jobIdMobile = "<:Smartphone:1559429785426329630>",
+		jobIdPc = "<:Pc:1559429845925240893>",
+	},
+
+	-- id | names = nomes do modelo do boss no jogo (Enemies / ReplicatedStorage)
+	bosses = {
+		{ id = "Darkbeard",  names = { "Darkbeard" } },
+		{ id = "Greybeard",  names = { "Greybeard" } },
+		{ id = "CakePrince", names = { "Cake Prince" } },
+		{ id = "DoughKing",  names = { "Dough King" } },
+		{ id = "SoulReaper", names = { "Soul Reaper" } },
+		{ id = "Ripindra",   names = { "rip_indra True Form", "rip_indra" } },
+		{ id = "Tyrant",     names = { "Tyrant of the Skies" } },
+	},
+}
+
+--=====================================================================
+--  SERVIÇOS
+--=====================================================================
+
+
+local request_ = nil
+if syn and syn.request then
+	request_ = syn.request
+elseif http_request then
+	request_ = http_request
+elseif http and http.request then
+	request_ = http.request
+elseif request then
+	request_ = request
+elseif httprequest then
+	request_ = httprequest
+end
+
+--=====================================================================
+--  DETECÇÃO DOS BOSSES
+--  spawned[id]  = modelo vivo perto de você (Workspace.Enemies / Workspace.Characters)
+--  template[id] = modelo no ReplicatedStorage (boss spawnado no servidor, mas longe)
+--=====================================================================
+local function normName(name)
+	return (tostring(name):lower():gsub("[^%w]", ""))
+end
+
+local bossByName = {}
+for _, boss in ipairs(W.bosses) do
+	for _, name in ipairs(boss.names) do
+		bossByName[normName(name)] = boss
+	end
+end
+
+local function isReady(model)
+	if not model or not model.Parent or not model:IsDescendantOf(Workspace) then
+		return false
+	end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+	return hum ~= nil and hum.Health > 0 and root ~= nil
+end
+
+local function isDormantValid(model)
+	if not model:IsA("Model") or Players:GetPlayerFromCharacter(model) then
+		return false
+	end
+	local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+	if not root then
+		return false
+	end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health <= 0 then
+		return false
+	end
+	return true
+end
+
+local memory = {}      -- id -> { hum, template } do último boss visto vivo (para saber se morreu)
+local stale = setmetatable({}, { __mode = "k" }) -- modelos do ReplicatedStorage já descartados
+local ignoreUntil = {} -- id -> tick até quando o ReplicatedStorage é ignorado (logo após a morte)
+
+local function scan()
+	local live, raw = {}, {}
+
+	local folders = {}
+	local enemiesFolder = Workspace:FindFirstChild("Enemies")
+	if enemiesFolder then
+		table.insert(folders, enemiesFolder)
+	end
+	local charactersFolder = Workspace:FindFirstChild("Characters")
+	if charactersFolder then
+		table.insert(folders, charactersFolder)
+	end
+
+	for _, folder in ipairs(folders) do
+		for _, model in ipairs(folder:GetChildren()) do
+			local boss = bossByName[normName(model.Name)]
+			if boss and not live[boss.id] and model:IsA("Model") and not Players:GetPlayerFromCharacter(model) and isReady(model) then
+				live[boss.id] = model
+			end
+		end
+	end
+
+	for _, model in ipairs(ReplicatedStorage:GetChildren()) do
+		local boss = bossByName[normName(model.Name)]
+		if boss and not raw[boss.id] and isDormantValid(model) then
+			raw[boss.id] = model
+		end
+	end
+
+	local template = {}
+	local now = tick()
+
+	for _, boss in ipairs(W.bosses) do
+		local id = boss.id
+		local liveModel = live[id]
+		local rsModel = raw[id]
+		local mem = memory[id]
+
+		if liveModel then
+			if rsModel then
+				stale[rsModel] = nil
+				template[id] = rsModel
+			end
+			ignoreUntil[id] = nil
+			memory[id] = { hum = liveModel:FindFirstChildOfClass("Humanoid"), template = rsModel }
+		else
+			if mem then
+				-- tinha boss vivo e ele sumiu
+				memory[id] = nil
+				if mem.hum and mem.hum.Health <= 0 then
+					-- morreu: o modelo que sobrou no ReplicatedStorage é resto, não é spawn novo
+					ignoreUntil[id] = now + W.deathCooldown
+					if rsModel and rsModel == mem.template then
+						stale[rsModel] = true
+					end
+				end
+			end
+
+			if rsModel and not stale[rsModel] and now >= (ignoreUntil[id] or 0) then
+				template[id] = rsModel
+			end
+		end
+	end
+
+	return { spawned = live, template = template }
+end
+
+--=====================================================================
+--  WEBHOOK
+--=====================================================================
+local sent = ENV.MoonHubWebhookSent or {} -- "jobId:bossId" -> true (sobrevive a reexecução do script)
+ENV.MoonHubWebhookSent = sent
+local lastSeen = {}
+
+local function codeBlock(text)
+	return "```\n" .. tostring(text) .. "\n```"
+end
+
+-- data e hora do envio (dia/mês/ano hh:mm)
+local function nowText()
+	local ok, text = pcall(os.date, W.dateFormat)
+	if ok and type(text) == "string" and text ~= "" then
+		return text
+	end
+	local ok2, text2 = pcall(function()
+		return DateTime.now():FormatLocalTime("DD/MM/YYYY HH:mm", "pt-br")
+	end)
+	return ok2 and text2 or ""
+end
+
+local function buildPayload(boss)
+	local E = W.emojis
+	local jobId = game.JobId ~= "" and game.JobId or "N/A"
+	local players = string.format("%d/%d", #Players:GetPlayers(), Players.MaxPlayers)
+
+	local embed = {
+		title = string.format("%s %s %s", E.moon, W.title, E.moon),
+		color = W.color,
+		fields = {
+			{ name = E.boss .. " Boss name:", value = codeBlock(boss.names[1]), inline = false },
+			{ name = E.players .. " Players:", value = codeBlock(players), inline = false },
+			{ name = E.placeId .. " PlaceId:", value = codeBlock(game.PlaceId), inline = false },
+			{ name = E.jobIdPc .. " JobId 「Pc Copy」", value = codeBlock(jobId), inline = false },
+			-- texto puro (sem ```): no celular dá para selecionar/copiar só o JobId
+			{ name = E.jobIdMobile .. " JobId 「Mobile Copy」", value = jobId, inline = false },
+		},
+		footer = { text = W.footerName .. " | " .. nowText() },
+	}
+	if type(W.thumbnailUrl) == "string" and W.thumbnailUrl ~= "" then
+		embed.thumbnail = { url = W.thumbnailUrl }
+	end
+
+	return {
+		embeds = { embed },
+		allowed_mentions = { parse = {} },
+	}
+end
+
+-- manda um payload (até 3 tentativas, respeitando o rate limit do Discord)
+local function post(payload)
+	if not (Config.WebhookOn and type(W.url) == "string" and W.url ~= "") then
+		return false
+	end
+	if not request_ then
+		warn("[Moon Hub] Webhook: this executor has no http request function")
+		return false
+	end
+
+	local body = HttpService:JSONEncode(payload)
+	for attempt = 1, 3 do
+		local ok, res = pcall(request_, {
+			Url = W.url,
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
+		local code = ok and type(res) == "table" and tonumber(res.StatusCode or res.Status) or nil
+		if code and code >= 200 and code < 300 then
+			return true
+		end
+
+		local waitFor = 3
+		if code == 429 then
+			local okJson, data = pcall(HttpService.JSONDecode, HttpService, res.Body or "{}")
+			if okJson and type(data) == "table" and tonumber(data.retry_after) then
+				waitFor = math.clamp(tonumber(data.retry_after) + 0.5, 1, 15)
+			end
+		end
+		warn(string.format("[Moon Hub] Webhook failed (attempt %d/3, status %s)", attempt, tostring(code or (ok and "?" or res))))
+		task.wait(waitFor)
+	end
+	return false
+end
+
+local function sendBoss(boss)
+	if not post(buildPayload(boss)) then
+		return false
+	end
+
+	-- 2ª mensagem só com o JobId (texto puro): no celular copia só ele
+	if W.mobileCopyMessage and game.JobId ~= "" then
+		task.wait(1)
+		post({ content = game.JobId, allowed_mentions = { parse = {} } })
+	end
+	return true
+end
+
+
+-- loop: detecta o boss e avisa 1x por boss em cada servidor
+local running = true
+local function shutdown() running = false; if ENV.MoonHubWebhookShutdown == shutdown then ENV.MoonHubWebhookShutdown = nil end end
+ENV.MoonHubWebhookShutdown = shutdown
+AFL.Webhook = W
+W.test = function()
+    task.spawn(function() sendBoss(W.bosses[1]) end)
+end
+task.spawn(function()
+    while running and Alive do
+        local ok, err = pcall(function()
+            if not Config.WebhookOn then return end
+            local found = scan()
+            local now = tick()
+            for _, boss in ipairs(W.bosses) do
+                local key = game.JobId .. ":" .. boss.id
+                if found.spawned[boss.id] ~= nil or found.template[boss.id] ~= nil then
+                    lastSeen[boss.id] = now
+                    if not sent[key] then
+                        sent[key] = true
+                        task.spawn(sendBoss, boss)
+                    end
+                elseif sent[key] and now - (lastSeen[boss.id] or 0) > W.rearmDelay then
+                    sent[key] = nil
+                end
+            end
+        end)
+        if not ok then warn("[Moon Hub] Webhook error: " .. tostring(err)) end
+        task.wait(W.scanInterval)
+    end
+end)
+if Config.WebhookOn == nil then Config.WebhookOn = true end
+local TS = Tabs.Script
+TS:AddSection("Rare Boss Webhook")
+TS:AddToggle("WebhookOn", { Title = "Rare Boss Webhook", Description = "Posts to Discord when Darkbeard, Greybeard, Cake Prince, Dough King, Soul Reaper, rip_indra or Tyrant is in the server", Default = Config.WebhookOn and true or false })
+    :OnChanged(function(v) Config.WebhookOn = v; W.enabled = v; persist() end)
+TS:AddButton({ Title = "Send Webhook Test", Description = "Sends a sample message to the Discord channel", Callback = function() W.test() end })
+end)()
 -- ---------- Dungeons ----------
 -- Base: NightDungeon (andar/lutar/escolher cartas dentro da dungeon) + Banana Hub (entrar no pad, dificuldade, min. de jogadores, conta que inicia).
 ;(function()
@@ -7516,6 +8536,1512 @@ end
     end)
 end)()
 
+-- ---------- Farm Mastery ----------
+-- Banana (Farm Mastery: bate normal até o mob chegar em X% de vida e termina com fruta/gun) + Quantum (Enable Mastery / Health Mob% / Auto Mastery Swords).
+;(function()
+    local T = Tabs.Mastery
+    local M = {}
+    AFL.Mast = M
+    local function d(k, v) if Config[k] == nil then Config[k] = v end end
+    d("MastOn", false); d("MastMethod", "Blox Fruit"); d("MastHP", 40); d("MastKeys", { Z = true, X = true, C = true, V = true })
+    d("MastFast", true); d("MastHold", 0.3); d("MastAllSword", false); d("MastAllMelee", false); d("MastAllGun", false)
+    local KEYS = { "Z", "X", "C", "V", "F" }
+    local ki, keyAt = 0, 0
+    M.status = "idle"
+
+    local function ratio(h) return h.MaxHealth > 0 and (h.Health / h.MaxHealth) or 1 end
+    local function methodTool() return (findTool(Config.MastMethod)) end
+    -- mobs com pouca vida: o ataque normal ignora eles (ficam vivos) e a fruta/gun termina
+    Config.MastSkip = function(h)
+        if not Config.MastOn or not h then return false end
+        if ratio(h) > (tonumber(Config.MastHP) or 40) / 100 then return false end
+        return methodTool() ~= nil
+    end
+    local function lowMob(hrp)
+        local f = workspace:FindFirstChild("Enemies"); if not f then return end
+        local best, bd
+        for _, m in ipairs(f:GetChildren()) do
+            local h, r = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
+            if h and r and h.Health > 0 and not m:GetAttribute("IsBoat") and ratio(h) <= (tonumber(Config.MastHP) or 40) / 100 then
+                local dist = (r.Position - hrp.Position).Magnitude
+                if dist <= 80 and (not bd or dist < bd) then best, bd = m, dist end
+            end
+        end
+        return best
+    end
+    local function pickKey()
+        for _ = 1, #KEYS do
+            ki = ki % #KEYS + 1
+            if Config.MastKeys[KEYS[ki]] then return KEYS[ki] end
+        end
+    end
+    -- chamado pelo loop de ataque: devolve true quando a Mastery cuidou do tick (o ataque normal pula)
+    function M.tick()
+        -- Auto Farm ALL Gun 600: arma de fogo equipada pelo farm atira por remote no mob mais perto
+        if Config.MastName and M.curKind == "Gun" then
+            local char, hrp = getChar()
+            local f = workspace:FindFirstChild("Enemies")
+            if char and hrp and f then
+                local best, bd
+                for _, m in ipairs(f:GetChildren()) do
+                    local h, r = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
+                    if h and r and h.Health > 0 and not m:GetAttribute("IsBoat") then
+                        local dist = (r.Position - hrp.Position).Magnitude
+                        if dist <= 120 and (not bd or dist < bd) then best, bd = r, dist end
+                    end
+                end
+                local held = char:FindFirstChildOfClass("Tool")
+                if best and held and held.Name == Config.MastName then
+                    Aim.part = best
+                    M.status = "Gun: shooting " .. best.Parent.Name
+                    if Config.ShotFire then Config.ShotFire({ kind = "gun", part = best }) end
+                    return true
+                end
+            end
+            return false
+        end
+        if not Config.MastOn then return false end
+        local char, hrp, hum = getChar()
+        if not char then return false end
+        local mob = lowMob(hrp)
+        if not mob then return false end
+        local tool, equipped = findTool(Config.MastMethod)
+        if not tool then M.status = "no " .. tostring(Config.MastMethod) .. " in the backpack"; return false end
+        if not equipped then hum:EquipTool(tool); M.status = "equipping " .. tool.Name; return true end
+        local part = mob:FindFirstChild("HumanoidRootPart")
+        Aim.part = part
+        if Config.MastMethod == "Gun" then
+            M.status = "Gun: shooting " .. mob.Name
+            if Config.ShotFire then Config.ShotFire({ kind = "gun", part = part }) end
+            return true
+        end
+        -- fruta: skills com a mira (Mouse.Hit) cravada no mob
+        if os.clock() - keyAt < (Config.MastFast and 0.12 or (tonumber(Config.MastHold) or 0.3) + 0.1) then return true end
+        keyAt = os.clock()
+        local key = pickKey()
+        if not key then M.status = "no skill key selected"; return true end
+        M.status = "Fruit: " .. key .. " on " .. mob.Name
+        pcall(AFL.tvHook)
+        AFL.TV.aimPos, AFL.TV.aimPart = part.Position, part
+        pcall(function()
+            local kc = Enum.KeyCode[key]
+            VirtualInputManager:SendKeyEvent(true, kc, false, game)
+            task.wait(Config.MastFast and 0.05 or (tonumber(Config.MastHold) or 0.3))
+            VirtualInputManager:SendKeyEvent(false, kc, false, game)
+        end)
+        task.delay(0.2, function() if AFL.TV.aimPart == part then AFL.TV.aimPos, AFL.TV.aimPart = nil, nil end end)
+        return true
+    end
+    Config.MastTick = M.tick
+
+    -- Auto Farm ALL Sword/Melee 600: uma arma por vez (sticky) até 600, depois a próxima, sem parar
+    local MAXM = 600
+    local MELEES = { ["combat"]=1, ["black leg"]=1, ["electro"]=1, ["fishman karate"]=1, ["dragon claw"]=1, ["superhuman"]=1, ["death step"]=1, ["sharkman karate"]=1, ["electric claw"]=1, ["dragon talon"]=1, ["godhuman"]=1, ["sanguine art"]=1, ["advanced combat"]=1 }
+    local function kind(t)
+        local tip = t.ToolTip
+        if tip == "Sword" or tip == "Melee" or tip == "Gun" then return tip end
+        if MELEES[string.lower(t.Name)] then return "Melee" end
+        return nil
+    end
+    local function readMast(t)
+        local v = t:FindFirstChild("Level") or t:FindFirstChild("Mastery")
+        if v and v:IsA("ValueBase") and tonumber(v.Value) then return tonumber(v.Value) end
+        local a = t:GetAttribute("Level") or t:GetAttribute("Mastery")
+        if tonumber(a) then return tonumber(a) end
+        return AFL.Inv.mastery and AFL.Inv.mastery(t.Name) or nil
+    end
+    local function tools(want)
+        local out = {}
+        for _, c in ipairs({ Player.Backpack, Player.Character }) do
+            if c then for _, t in ipairs(c:GetChildren()) do
+                if t:IsA("Tool") and kind(t) == want then out[#out + 1] = t end
+            end end
+        end
+        return out
+    end
+    M.cur = nil
+    function M.pickWeapon()
+        Config.MastName = nil
+        for _, want in ipairs({ "Sword", "Melee", "Gun" }) do
+            if (want == "Sword" and Config.MastAllSword) or (want == "Melee" and Config.MastAllMelee) or (want == "Gun" and Config.MastAllGun) then
+                local list = tools(want)
+                -- continua na arma atual até 600
+                if M.cur and M.curKind == want then
+                    for _, t in ipairs(list) do
+                        if t.Name == M.cur then
+                            local m = readMast(t)
+                            if m and m < MAXM then Config.MastName = t.Name; M.weaponText = want .. ": " .. t.Name .. " (" .. math.floor(m) .. "/" .. MAXM .. ")"; return end
+                        end
+                    end
+                end
+                local best, bm, unk, done = nil, nil, 0, 0
+                for _, t in ipairs(list) do
+                    local m = readMast(t)
+                    if not m then unk += 1
+                    elseif m >= MAXM then done += 1
+                    elseif not bm or m < bm then best, bm = t, m end
+                end
+                if best then
+                    M.cur, M.curKind = best.Name, want
+                    Config.MastName = best.Name
+                    M.weaponText = want .. ": " .. best.Name .. " (" .. math.floor(bm) .. "/" .. MAXM .. ") | done " .. done .. "/" .. #list
+                    return
+                end
+                M.weaponText = want .. ": nothing to farm (" .. done .. " at 600, " .. unk .. " unreadable of " .. #list .. ")"
+            end
+        end
+    end
+    task.spawn(function()
+        while Alive do
+            pcall(M.pickWeapon)
+            task.wait(3)
+        end
+    end)
+
+    -- ===== UI =====
+    local function tg(id, title, desc)
+        T:AddToggle(id, { Title = title, Description = desc, Default = Config[id] and true or false }):OnChanged(function(v) Config[id] = v; persist() end)
+    end
+    T:AddSection("Mastery Farm")
+    local MV = { "Blox Fruit", "Gun" }
+    T:AddDropdown("MastMethod", { Title = "Select Method Farm Mastery", Description = "Weapon that finishes the mobs (the one that gains mastery)", Values = MV, Default = (Config.MastMethod == "Gun") and 2 or 1 })
+        :OnChanged(function(v) Config.MastMethod = v; persist() end)
+    T:AddSlider("MastHP", { Title = "Health %", Description = "The normal attack stops when the mob reaches this life; the fruit/gun finishes it", Min = 15, Max = 100, Default = tonumber(Config.MastHP) or 40, Rounding = 0 })
+        :OnChanged(function(v) Config.MastHP = math.floor(v); persist() end)
+    tg("MastOn", "Farm Mastery", "Works inside the other farms (Level, Bones, Dough...): hits normally, then finishes each mob with the fruit skills or the gun")
+    T:AddSection("Skills (Blox Fruit)")
+    local kd = T:AddDropdown("MastKeysDD", { Title = "Fruit Skills", Description = "Keys used on the mob", Values = KEYS, Multi = true, Default = { Z = true, X = true, C = true, V = true } })
+    kd:OnChanged(function(val)
+        local set = {}
+        if type(val) == "table" then for k, x in pairs(val) do if x == true then set[k] = true elseif type(x) == "string" then set[x] = true end end end
+        Config.MastKeys = set
+    end)
+    tg("MastFast", "Use skill fast (don't hold)", "Taps the keys quickly. Off: holds each key for the time below")
+    T:AddSlider("MastHold", { Title = "Skill Hold Time (s)", Min = 0, Max = 3, Default = tonumber(Config.MastHold) or 0.3, Rounding = 1 })
+        :OnChanged(function(v) Config.MastHold = v; persist() end)
+    T:AddSection("Mastery Weapon")
+    tg("MastAllSword", "Auto Farm ALL Sword 600", "Finds the sword below 600 mastery, equips it, farms it to 600, then switches to the next one, forever (one at a time)")
+    tg("MastAllMelee", "Auto Farm ALL Melee 600", "Same for fighting styles: equips the one below 600 and farms it to 600, then the next (one at a time)")
+    tg("MastAllGun", "Auto Farm ALL Gun 600", "Same for guns: equips the gun below 600 mastery and shoots the mobs by remote until 600, then the next (one at a time)")
+    T:AddSection("Mastery Status")
+    local info = T:AddParagraph({ Title = "Mastery", Content = "Checking..." })
+    task.spawn(function()
+        while Alive do
+            pcall(function()
+                info:SetDesc(table.concat({
+                    "Method: " .. tostring(Config.MastMethod) .. " | finishes at " .. tostring(Config.MastHP) .. "% life | " .. (Config.MastOn and "ON" or "off"),
+                    "Now: " .. tostring(M.status),
+                    "Weapon being farmed: " .. tostring(M.weaponText or "-"),
+                    "Inventory: " .. tostring(AFL.Inv.state),
+                }, "\n"))
+            end)
+            task.wait(2)
+        end
+    end)
+end)()
+
+-- ---------- Aimbot nativo ----------
+-- Modos: Silent (Mouse.Hit/Target), Camera Lock (suave) ou Both. Alvos: Players / NPCs / Both. FOV circular, prioridade, previsão, wall check, team check, tecla de ativação.
+;(function()
+    local A = Tabs.Aimbot
+    local AB = {}
+    AFL.Aim = AB
+    local UIS = UserInputService
+    local function d(k, v) if Config[k] == nil then Config[k] = v end end
+    d("AimOn", false); d("AimMode", "Silent"); d("AimTargets", "Players"); d("AimPriority", "Closest to Crosshair"); d("AimPart", "HumanoidRootPart")
+    d("AimFOV", 160); d("AimShowFOV", true); d("AimFOVColor", "Cyan"); d("AimFOVOrigin", (UIS.TouchEnabled and not UIS.KeyboardEnabled) and "Center" or "Mouse"); d("AimSmooth", 0.35); d("AimPredict", 0.12); d("AimPredictOn", true)
+    d("AimMaxDist", 1500); d("AimVisible", false); d("AimTeam", true); d("AimSticky", true); d("AimTrigger", "Always On"); d("AimKey", "Q")
+    d("AimHighlight", true); d("AimLine", false); d("AimMinHP", 0)
+    local COLORS = { White = Color3.fromRGB(255, 255, 255), Cyan = Color3.fromRGB(0, 230, 255), Red = Color3.fromRGB(255, 60, 60), Green = Color3.fromRGB(70, 255, 110), Purple = Color3.fromRGB(180, 110, 255), Yellow = Color3.fromRGB(255, 225, 60) }
+    local held, toggled = false, false
+    local target, tPos, tPart = nil, nil, nil
+    AB.status = "idle"
+
+    local function idx(list, v) for i, x in ipairs(list) do if x == v then return i end end return 1 end
+    local function dd(id, title, desc, list, key)
+        A:AddDropdown(id, { Title = title, Description = desc, Values = list, Default = idx(list, Config[key]) }):OnChanged(function(v) Config[key] = v; persist() end)
+    end
+    local function tg(id, title, desc, key)
+        A:AddToggle(id, { Title = title, Description = desc, Default = Config[key] and true or false }):OnChanged(function(v) Config[key] = v; persist() end)
+    end
+    local function sl(id, title, desc, key, mn, mx, rnd)
+        A:AddSlider(id, { Title = title, Description = desc, Min = mn, Max = mx, Default = tonumber(Config[key]) or mn, Rounding = rnd or 0 }):OnChanged(function(v) Config[key] = v; persist() end)
+    end
+
+    -- ===== visuais =====
+    local circle, hasDrawing, line
+    pcall(function()
+        if Drawing and Drawing.new then
+            circle = Drawing.new("Circle"); circle.Thickness = 1.5; circle.NumSides = 64; circle.Filled = false; circle.Visible = false
+            line = Drawing.new("Line"); line.Thickness = 1.5; line.Visible = false
+            hasDrawing = true
+        end
+    end)
+    local fgui, fframe
+    if not hasDrawing then
+        pcall(function()
+            fgui = Instance.new("ScreenGui"); fgui.Name = "MoonAimFOV"; fgui.IgnoreGuiInset = true; fgui.ResetOnSpawn = false
+            fgui.Parent = (type(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+            fframe = Instance.new("Frame"); fframe.BackgroundTransparency = 1; fframe.AnchorPoint = Vector2.new(0.5, 0.5); fframe.Visible = false; fframe.Parent = fgui
+            Instance.new("UICorner", fframe).CornerRadius = UDim.new(1, 0)
+            local st = Instance.new("UIStroke", fframe); st.Thickness = 1.5; fframe:SetAttribute("st", true)
+        end)
+    end
+    local hl
+    pcall(function()
+        hl = Instance.new("Highlight"); hl.FillTransparency = 0.75; hl.OutlineTransparency = 0; hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Enabled = false; hl.Parent = workspace
+    end)
+
+    -- ===== alvo =====
+    local PARTS = { "Head", "HumanoidRootPart", "UpperTorso", "Torso" }
+    local function aimPartOf(char)
+        local w = Config.AimPart
+        if w == "Closest Part" then
+            local best, bd
+            local m = UIS:GetMouseLocation()
+            for _, n in ipairs(PARTS) do
+                local p = char:FindFirstChild(n)
+                if p then
+                    local v, on = workspace.CurrentCamera:WorldToViewportPoint(p.Position)
+                    if on then
+                        local dist = (Vector2.new(v.X, v.Y) - m).Magnitude
+                        if not bd or dist < bd then best, bd = p, dist end
+                    end
+                end
+            end
+            return best or char:FindFirstChild("HumanoidRootPart")
+        elseif w == "Random" then
+            return char:FindFirstChild(PARTS[math.random(1, #PARTS)]) or char:FindFirstChild("HumanoidRootPart")
+        elseif w == "Torso" then
+            return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+        end
+        return char:FindFirstChild(w) or char:FindFirstChild("HumanoidRootPart")
+    end
+    local function candidates()
+        local out, want = {}, Config.AimTargets
+        if want == "Players" or want == "Both" then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= Player and p.Character and not (Config.AimTeam and p.Team ~= nil and p.Team == Player.Team) then out[#out + 1] = p.Character end
+            end
+        end
+        if want == "NPCs" or want == "Both" then
+            local f = workspace:FindFirstChild("Enemies")
+            if f then for _, m in ipairs(f:GetChildren()) do if not m:GetAttribute("IsBoat") then out[#out + 1] = m end end end
+        end
+        return out
+    end
+    local function visible(cam, char, part)
+        local mine = Player.Character
+        local rp = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { mine or cam, char, cam }
+        local o = cam.CFrame.Position
+        return workspace:Raycast(o, part.Position - o, rp) == nil
+    end
+    local function valid(cam, char, mult)
+        local hum, hrp = char:FindFirstChildOfClass("Humanoid"), char:FindFirstChild("HumanoidRootPart")
+        if not (hum and hrp) or hum.Health <= 0 then return end
+        if (tonumber(Config.AimMinHP) or 0) > 0 and hum.MaxHealth > 0 and hum.Health / hum.MaxHealth * 100 < Config.AimMinHP then return end
+        local part = aimPartOf(char) or hrp
+        local dist = (part.Position - cam.CFrame.Position).Magnitude
+        if dist > (tonumber(Config.AimMaxDist) or 1500) * (mult or 1) then return end
+        local v, on = cam:WorldToViewportPoint(part.Position)
+        if not on then return end
+        local origin = (Config.AimFOVOrigin == "Center") and (cam.ViewportSize / 2) or UIS:GetMouseLocation()
+        local sd = (Vector2.new(v.X, v.Y) - origin).Magnitude
+        if sd > (tonumber(Config.AimFOV) or 160) * (mult or 1) then return end
+        if Config.AimVisible and not visible(cam, char, part) then return end
+        return { char = char, part = part, hum = hum, dist = dist, sd = sd }
+    end
+    local function pick(cam)
+        if Config.AimSticky and target and target.Parent then
+            local r = valid(cam, target, 1.5)
+            if r then return r end
+        end
+        local best, key
+        for _, c in ipairs(candidates()) do
+            local r = valid(cam, c)
+            if r then
+                local k
+                if Config.AimPriority == "Closest Distance" then k = r.dist
+                elseif Config.AimPriority == "Lowest Health" then k = r.hum.Health
+                elseif Config.AimPriority == "Highest Health" then k = -r.hum.Health
+                else k = r.sd end
+                if not key or k < key then best, key = r, k end
+            end
+        end
+        return best
+    end
+
+    -- ===== ativação por tecla =====
+    local function isKey(i)
+        local k = Config.AimKey
+        if k == "MouseButton2" then return i.UserInputType == Enum.UserInputType.MouseButton2 end
+        local ok, kc = pcall(function() return Enum.KeyCode[k] end)
+        return ok and i.KeyCode == kc
+    end
+    table.insert(Connections, UIS.InputBegan:Connect(function(i, gp)
+        if gp and Config.AimKey ~= "MouseButton2" then return end
+        if isKey(i) then held = true; toggled = not toggled end
+    end))
+    table.insert(Connections, UIS.InputEnded:Connect(function(i) if isKey(i) then held = false end end))
+    local function active()
+        if not Config.AimOn then return false end
+        if Config.AimTrigger == "Hold Key" then return held or (UIS.TouchEnabled and not UIS.KeyboardEnabled and toggled) end
+        if Config.AimTrigger == "Toggle Key" then return toggled end
+        return true
+    end
+
+    -- botão flutuante "AIM" no celular (não existe tecla): liga/desliga a mira quando a ativação não é "Always On"
+    local abtn, agui
+    if UIS.TouchEnabled then
+        pcall(function()
+            agui = Instance.new("ScreenGui")
+            agui.Name, agui.ResetOnSpawn, agui.IgnoreGuiInset, agui.DisplayOrder = "MoonAimBtn", false, true, 998
+            agui.Parent = (type(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+            abtn = Instance.new("TextButton")
+            abtn.Size, abtn.Position, abtn.AnchorPoint = UDim2.fromOffset(58, 58), UDim2.new(1, -90, 0.5, 0), Vector2.new(0, 0.5)
+            abtn.Text, abtn.Font, abtn.TextSize, abtn.TextColor3 = "AIM", Enum.Font.GothamBold, 16, Color3.fromRGB(255, 255, 255)
+            abtn.BackgroundColor3, abtn.BackgroundTransparency, abtn.Visible = Color3.fromRGB(20, 30, 40), 0.25, false
+            abtn.Parent = agui
+            Instance.new("UICorner", abtn).CornerRadius = UDim.new(1, 0)
+            local st = Instance.new("UIStroke", abtn); st.Color, st.Thickness = Color3.fromRGB(0, 230, 255), 2
+            abtn.MouseButton1Click:Connect(function() toggled = not toggled end)
+        end)
+    end
+
+    -- ===== silent: Mouse.Hit / Mouse.Target =====
+    local hooked = false
+    local function hook()
+        if hooked or not hookmetamethod then return end
+        hooked = true
+        local mouse = Player:GetMouse()
+        local wrap = newcclosure or function(f) return f end
+        local old
+        local ok = pcall(function()
+            old = hookmetamethod(game, "__index", wrap(function(self, key)
+                if self == mouse and Alive and tPos and (Config.AimMode ~= "Camera Lock") and not (checkcaller and checkcaller())
+                    and not (AFL.TV and AFL.TV.aimPos) then
+                    if key == "Hit" then return CFrame.new(tPos) end
+                    if key == "Target" then return tPart end
+                end
+                return old(self, key)
+            end))
+        end)
+        if not ok then hooked = false end
+    end
+
+    -- ===== loop principal =====
+    local acc = 0
+    pcall(function() RunService:UnbindFromRenderStep("MoonHubAimbot") end)
+    RunService:BindToRenderStep("MoonHubAimbot", Enum.RenderPriority.Camera.Value + 1, function(dt)
+        if not Alive then
+            pcall(function() RunService:UnbindFromRenderStep("MoonHubAimbot") end)
+            tPos, tPart = nil, nil
+            if circle then circle.Visible = false; if line then line.Visible = false end end
+            if hl then hl.Enabled = false end
+            if fgui then fgui:Destroy() end
+            if agui then agui:Destroy() end
+            return
+        end
+        if abtn then
+            abtn.Visible = Config.AimOn and Config.AimTrigger ~= "Always On"
+            abtn.BackgroundColor3 = toggled and Color3.fromRGB(0, 120, 150) or Color3.fromRGB(20, 30, 40)
+        end
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local color = COLORS[Config.AimFOVColor] or COLORS.Cyan
+        local origin = (Config.AimFOVOrigin == "Center") and (cam.ViewportSize / 2) or UIS:GetMouseLocation()
+        local showFov = Config.AimOn and Config.AimShowFOV
+        if circle then
+            circle.Visible = showFov and true or false
+            if showFov then circle.Position = origin; circle.Radius = tonumber(Config.AimFOV) or 160; circle.Color = color end
+        elseif fframe then
+            fframe.Visible = showFov and true or false
+            if showFov then
+                local r = (tonumber(Config.AimFOV) or 160) * 2
+                fframe.Size = UDim2.fromOffset(r, r)
+                fframe.Position = UDim2.fromOffset(origin.X, origin.Y)
+                local st = fframe:FindFirstChildOfClass("UIStroke"); if st then st.Color = color end
+            end
+        end
+        if not active() then
+            target, tPos, tPart = nil, nil, nil
+            AB.status = Config.AimOn and "waiting for the key" or "off"
+            if hl then hl.Enabled = false end
+            if line then line.Visible = false end
+            return
+        end
+        acc += dt
+        if acc >= 0.02 or not target then
+            acc = 0
+            local r = pick(cam)
+            if r then target, tPart = r.char, r.part; AB.cur = r else target, tPart, AB.cur = nil, nil, nil end
+        end
+        if not (target and tPart and tPart.Parent) then
+            tPos, tPart = nil, nil
+            AB.status = "no target in FOV"
+            if hl then hl.Enabled = false end
+            if line then line.Visible = false end
+            return
+        end
+        local pos = tPart.Position
+        if Config.AimPredictOn then
+            local v = tPart.AssemblyLinearVelocity
+            pos = pos + v * (tonumber(Config.AimPredict) or 0.12)
+        end
+        tPos = pos
+        local mode = Config.AimMode
+        if mode == "Silent" or mode == "Both" then hook() end
+        if mode == "Camera Lock" or mode == "Both" then
+            local goal = CFrame.lookAt(cam.CFrame.Position, pos)
+            local s = math.clamp(tonumber(Config.AimSmooth) or 0.35, 0.02, 1)
+            cam.CFrame = (s >= 1) and goal or cam.CFrame:Lerp(goal, s)
+        end
+        if hl then
+            hl.Enabled = Config.AimHighlight and true or false
+            if hl.Adornee ~= target then hl.Adornee = target end
+            hl.FillColor, hl.OutlineColor = color, color
+        end
+        if line then
+            line.Visible = Config.AimLine and true or false
+            if Config.AimLine then
+                local v = cam:WorldToViewportPoint(pos)
+                line.From, line.To, line.Color = origin, Vector2.new(v.X, v.Y), color
+            end
+        end
+        local who = Players:GetPlayerFromCharacter(target)
+        AB.status = string.format("%s -> %s (%dm, %d HP)", mode, who and who.Name or target.Name, math.floor(AB.cur and AB.cur.dist or 0), math.floor(AB.cur and AB.cur.hum.Health or 0))
+    end)
+
+    -- ===== UI =====
+    A:AddSection("Aimbot")
+    tg("AimOn", "Enable Aimbot", "Native aimbot (Silent / Camera Lock). Needs a hold/toggle key if you pick one below", "AimOn")
+    dd("AimMode", "Aim Mode", "Silent = skills/clicks go to the target without moving your camera | Camera Lock = smooth camera lock | Both", { "Silent", "Camera Lock", "Both" }, "AimMode")
+    dd("AimTargets", "Targets", "Who the aimbot locks on", { "Players", "NPCs", "Both" }, "AimTargets")
+    dd("AimPriority", "Target Priority", "How the target is chosen inside the FOV", { "Closest to Crosshair", "Closest Distance", "Lowest Health", "Highest Health" }, "AimPriority")
+    dd("AimPart", "Aim Part", "Body part to aim at", { "HumanoidRootPart", "Head", "Torso", "Closest Part", "Random" }, "AimPart")
+    A:AddSection("Activation")
+    dd("AimTrigger", "Activation", "Always On, or only while holding / after toggling the key", { "Always On", "Hold Key", "Toggle Key" }, "AimTrigger")
+    dd("AimKey", "Activation Key", "Key (or right mouse button) for Hold / Toggle", { "Q", "E", "R", "T", "G", "H", "LeftAlt", "LeftControl", "CapsLock", "MouseButton2" }, "AimKey")
+    A:AddSection("FOV")
+    tg("AimShowFOV", "Show FOV Circle", "Draws the circle that limits the aimbot", "AimShowFOV")
+    sl("AimFOV", "FOV Size", "Radius of the circle in pixels", "AimFOV", 30, 800)
+    dd("AimFOVOrigin", "FOV Origin", "Follow the mouse or stay in the screen center", { "Mouse", "Center" }, "AimFOVOrigin")
+    dd("AimFOVColor", "FOV Color", "Color of the circle / highlight / line", { "Cyan", "White", "Red", "Green", "Purple", "Yellow" }, "AimFOVColor")
+    A:AddSection("Tuning")
+    sl("AimSmooth", "Smoothness (Camera Lock)", "Low = slow and smooth, 1 = instant", "AimSmooth", 0.02, 1, 2)
+    tg("AimPredictOn", "Prediction", "Leads the target by its velocity", "AimPredictOn")
+    sl("AimPredict", "Prediction Amount (s)", "How far ahead to aim", "AimPredict", 0, 0.6, 2)
+    sl("AimMaxDist", "Max Distance", "Ignore targets farther than this (studs)", "AimMaxDist", 50, 5000)
+    sl("AimMinHP", "Min Target HP % (0 = off)", "Ignores targets with less life than this percent", "AimMinHP", 0, 100)
+    tg("AimVisible", "Visible Check", "Skips targets behind walls", "AimVisible")
+    tg("AimTeam", "Team Check", "Skips players of your own team (Players mode)", "AimTeam")
+    tg("AimSticky", "Sticky Target", "Keeps the same target until it leaves the FOV", "AimSticky")
+    A:AddSection("Visuals")
+    tg("AimHighlight", "Highlight Target", "Outlines the locked target", "AimHighlight")
+    tg("AimLine", "Target Line", "Line from the FOV center to the target (needs Drawing support)", "AimLine")
+    A:AddSection("External Script")
+    local AIM_URL = "https://api.luarmor.net/files/v4/loaders/0c7ea360c9bca139fc70fff09aad7d8b.lua"
+    local loaded, status = false, "not loaded"
+    A:AddToggle("PvpAimbot", { Title = "Load External PVP / Aimbot Script", Description = "Third-party script (Blox Fruits only). It cannot be unloaded: it stays active until you rejoin", Default = false }):OnChanged(function(v)
+        if not v or loaded then return end
+        if game.GameId ~= 994732206 then
+            Fluent:Notify({ Title = "Moon Hub", Content = "The Aimbot / PVP script only supports Blox Fruits.", Duration = 5 })
+            return
+        end
+        loaded = true
+        status = "loading..."
+        task.spawn(function()
+            local ok, err = pcall(function() loadstring(game:HttpGet(AIM_URL))() end)
+            status = ok and "loaded (active until you rejoin)" or ("failed: " .. tostring(err))
+            if not ok then
+                loaded = false
+                warn("[Moon Hub] PVP script failed: " .. tostring(err))
+                Fluent:Notify({ Title = "Moon Hub", Content = "The PVP script failed to load (see the console).", Duration = 6 })
+            end
+        end)
+    end)
+    A:AddSection("Aimbot Status")
+    local ainfo = A:AddParagraph({ Title = "Aimbot", Content = "Checking..." })
+    task.spawn(function()
+        while Alive do
+            pcall(function()
+                ainfo:SetDesc(table.concat({
+                    "Aimbot: " .. (Config.AimOn and "ON" or "off") .. " | " .. tostring(Config.AimMode) .. " | " .. tostring(Config.AimTargets),
+                    "Now: " .. tostring(AB.status),
+                    "Mouse hook: " .. (hookmetamethod and "supported" or "NOT supported by your executor (use Camera Lock)") .. " | Drawing: " .. (hasDrawing and "yes" or "no (using a frame)"),
+                    "External script: " .. status,
+                }, "\n"))
+            end)
+            task.wait(1)
+        end
+    end)
+end)()
+
+-- ---------- Aba Status: ilhas, jogador, servidor, mundo e o estado de todas as funções ----------
+;(function()
+    local T = Tabs.Status
+    local CollectionService = game:GetService("CollectionService")
+    local StatsSvc = game:GetService("Stats")
+    local LightingSvc = game:GetService("Lighting")
+    local t0 = os.clock()
+    local fps, frames, fpsAt = 60, 0, os.clock()
+    table.insert(Connections, RunService.Heartbeat:Connect(function()
+        frames += 1
+        local now = os.clock()
+        if now - fpsAt >= 1 then fps = frames / (now - fpsAt); frames, fpsAt = 0, now end
+    end))
+
+    local function fmt(n) n = tonumber(n) or 0; local s = tostring(math.floor(n)); return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")) end
+    local function hms(s) s = math.floor(s); return string.format("%02d:%02d:%02d", s // 3600, (s % 3600) // 60, s % 60) end
+    local function mapChild(name) local m = workspace:FindFirstChild("Map"); return m and m:FindFirstChild(name) end
+    local function loc(name)
+        local w = workspace:FindFirstChild("_WorldOrigin"); local l = w and w:FindFirstChild("Locations")
+        return l and l:FindFirstChild(name)
+    end
+    local function pos(inst)
+        if not inst then return end
+        if inst:IsA("BasePart") then return inst.Position end
+        local ok, p = pcall(function() return inst:GetPivot().Position end)
+        return ok and p or nil
+    end
+    local function distTo(inst)
+        local _, hrp = getChar()
+        local p = pos(inst)
+        return (hrp and p) and math.floor((hrp.Position - p).Magnitude) or nil
+    end
+    local function dataVal(name)
+        local ok, v = pcall(function() return Player.Data[name].Value end)
+        return ok and v or nil
+    end
+    local function onoff(v) return v and "ON" or "off" end
+    local function data2(x) return tostring(x == nil and "-" or x) end
+
+    -- ===== construtores de bloco =====
+    local blocks = {}
+    local function block(title, fn)
+        local p = T:AddParagraph({ Title = title, Content = "..." })
+        blocks[#blocks + 1] = { p = p, fn = fn, title = title }
+        return p
+    end
+    local function island(name, getter, extra)
+        local p = T:AddParagraph({ Title = name .. ": checking...", Content = "" })
+        blocks[#blocks + 1] = { p = p, island = name, fn = function()
+            local isl = getter()
+            local d = isl and distTo(isl)
+            local desc = isl and ("Distance: " .. data2(d) .. " studs" .. (extra and extra(isl) or "")) or "Not on the map right now"
+            return (isl ~= nil), desc
+        end }
+    end
+
+    -- ===== ILHAS =====
+    T:AddSection("Islands")
+    island("Mirage Island", function() return AFL.Mirage and AFL.Mirage.island() end, function() return "" end)
+    island("Kitsune Island", function() return mapChild("KitsuneIsland") or loc("Kitsune Island") end, function(isl)
+        local ok, en = pcall(function() return mapChild("KitsuneIsland").ShrineDialogPart.ProximityPrompt.Enabled end)
+        return ok and (en and " | shrine ready" or " | shrine busy") or ""
+    end)
+    island("Prehistoric Island", function() return AFL.Vulc and AFL.Vulc.island() end, function() return "" end)
+    island("Frozen Dimension", function() return loc("Frozen Dimension") end, function() return "" end)
+    island("Haunted Island (Sea Event)", function() return mapChild("HauntedIsland") or loc("Haunted Island") end, function() return "" end)
+
+    -- ===== CÉU E LUA =====
+    T:AddSection("Sky & Moon")
+    block("World", function()
+        local ct = LightingSvc.ClockTime
+        local night = ct >= 18 or ct < 5.5
+        local tex = ""
+        pcall(function() tex = LightingSvc.Sky.MoonTextureId end)
+        local full = tex == "http://www.roblox.com/asset/?id=9709149431"
+        return table.concat({
+            string.format("Time: %02d:%02d (%s)", math.floor(ct), math.floor((ct % 1) * 60), night and "night" or "day"),
+            "Moon: " .. (full and "FULL MOON" or "not full") .. (night and "" or " (it is day)"),
+            "Sea: " .. tostring(getSea()) .. " | Place: " .. tostring(game.PlaceId),
+            "Rough sea: " .. ((workspace:FindFirstChild("RoughSea") or LightingSvc:FindFirstChild("RoughSea")) and "YES" or "no"),
+        }, "\n")
+    end)
+
+    -- ===== JOGADOR =====
+    T:AddSection("Player")
+    block("Character", function()
+        local char, hrp, hum = getChar()
+        local lines = {
+            "Level: " .. fmt(getPlayerLevel()) .. " | Beli: " .. fmt(dataVal("Beli")) .. " | Fragments: " .. fmt(dataVal("Fragments")),
+            "Race: " .. data2(dataVal("Race")) .. " | Fruit: " .. data2(dataVal("DevilFruit")),
+            "Team: " .. tostring(Player.Team and Player.Team.Name or "none") .. " | Bounty/Honor: " .. data2(dataVal("Bounty") or dataVal("Honor")),
+        }
+        if hum and hrp then
+            lines[#lines + 1] = string.format("Health: %d/%d | Energy: %s", hum.Health, hum.MaxHealth, data2((function() local ok, e = pcall(function() return math.floor(Player.Character.Energy.Value) end); return ok and e or nil end)()))
+            lines[#lines + 1] = string.format("Position: %d, %d, %d | Sitting: %s", hrp.Position.X, hrp.Position.Y, hrp.Position.Z, hum.Sit and "yes" or "no")
+        else lines[#lines + 1] = "Character is not loaded" end
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        lines[#lines + 1] = "Holding: " .. (tool and tool.Name or "nothing")
+        return table.concat(lines, "\n")
+    end)
+
+    -- ===== SERVIDOR =====
+    T:AddSection("Server")
+    block("Server", function()
+        local ping = "?"
+        pcall(function() ping = math.floor(StatsSvc.Network.ServerStatsItem["Data Ping"]:GetValue()) .. " ms" end)
+        return table.concat({
+            string.format("Players: %d/%d | Ping: %s | FPS: %d", #Players:GetPlayers(), Players.MaxPlayers, ping, math.floor(fps)),
+            "Script running for: " .. hms(os.clock() - t0),
+            "JobId: " .. string.sub(game.JobId, 1, 18) .. "...",
+        }, "\n")
+    end)
+    T:AddButton({ Title = "Copy Job ID", Description = "Copies this server's id (to join the same server later)", Callback = function()
+        local ok = pcall(function() setclipboard(game.JobId) end)
+        Fluent:Notify({ Title = "Moon Hub", Content = ok and "Job ID copied." or "Your executor can't copy to the clipboard.", Duration = 4 })
+    end })
+
+    -- ===== FARM =====
+    T:AddSection("Farm")
+    block("Farm State", function()
+        local on = {}
+        for _, key in ipairs(AFL.prioOrder()) do
+            local f = AFL.feat[key]
+            local okOn, v = pcall(function() return f and f.on() end)
+            if okOn and v and not f.hidden then
+                local names = f.labels and f.labels() or { f.label }
+                for _, n in ipairs(names) do on[#on + 1] = n end
+            end
+        end
+        return table.concat({
+            "Mode: " .. tostring(State.Mode) .. " | " .. tostring(State.Text),
+            "Busy: " .. onoff(State.Busy) .. " | Farm type: " .. tostring(Config.Mode),
+            "Quest: " .. tostring(Diag.quest or "-"),
+            "Fight: " .. tostring(Diag.fight or "-"),
+            "Attack: " .. tostring(Diag.attack or "-"),
+            "Running (in priority order): " .. (#on > 0 and table.concat(on, " > ") or "nothing"),
+        }, "\n")
+    end)
+
+    -- ===== FUNÇÕES =====
+    T:AddSection("Functions")
+    block("Raid", function() return "Running: " .. onoff(AFL.Raid and AFL.Raid.active and AFL.Raid.active()) .. "\n" .. tostring(Diag.raid or "idle") end)
+    block("Dungeon", function() return tostring(Diag.dungeon or "idle") end)
+    block("Mastery", function() return tostring(AFL.Mast and AFL.Mast.status or "idle") .. "\nWeapon: " .. tostring(AFL.Mast and AFL.Mast.weaponText or "-") end)
+    block("Sea Events", function() return tostring(Diag.sea or "idle") end)
+    block("Kitsune Island", function() return tostring(AFL.SeaEv and AFL.SeaEv.kit or "idle") end)
+    block("Leviathan", function() return tostring(AFL.SeaEv and AFL.SeaEv.lev or "idle") end)
+    block("Vulcan", function() return tostring(Diag.vulc or "idle") end)
+    block("Mirage", function() return tostring(Diag.mirage or "idle") end)
+    block("Bosses", function() return "Boss: " .. tostring(Diag.boss or "idle") .. "\nAwakened: " .. tostring(Diag.awk or "idle") .. "\nElite: " .. tostring(Diag.elite or "idle") end)
+    block("Other", function()
+        return table.concat({
+            "Gacha: " .. tostring(Diag.gacha or "idle"),
+            "Bones: " .. tostring(Diag.bones or "idle"),
+            "Dough Prince / Tyrant: " .. tostring(Diag.summon or "idle"),
+            "Secret quest: " .. tostring(Diag.secret or "idle"),
+            "Buy: " .. tostring(Diag.buy or "idle"),
+            "Fog: " .. tostring(Diag.fog or "off"),
+        }, "\n")
+    end)
+    block("Aimbot", function() return (Config.AimOn and "ON" or "off") .. " | " .. tostring(AFL.Aim and AFL.Aim.status or "idle") end)
+
+    -- ===== MUNDO =====
+    T:AddSection("World & Events")
+    block("Enemies", function()
+        local en = workspace:FindFirstChild("Enemies")
+        local n, near = 0, 0
+        local _, hrp = getChar()
+        if en then for _, m in ipairs(en:GetChildren()) do
+            local h, r = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
+            if h and h.Health > 0 then n += 1; if r and hrp and (r.Position - hrp.Position).Magnitude < 300 then near += 1 end end
+        end end
+        local sb, ships = 0, 0
+        local f = workspace:FindFirstChild("SeaBeasts"); if f then sb = #f:GetChildren() end
+        local bf = workspace:FindFirstChild("Boats"); if bf then ships = #bf:GetChildren() end
+        local fr, ch = 0, 0
+        for _, c in ipairs(workspace:GetChildren()) do if c:IsA("Tool") and string.find(c.Name, "Fruit") then fr += 1 end end
+        pcall(function() ch = #CollectionService:GetTagged("_ChestTagged") end)
+        return table.concat({
+            "Enemies alive: " .. n .. " (" .. near .. " within 300 studs)",
+            "Sea beasts: " .. sb .. " | Boats: " .. ships,
+            "Fruits on the ground: " .. fr .. " | Chests: " .. ch,
+        }, "\n")
+    end)
+    block("Bosses Alive", function()
+        local alive = {}
+        for _, name in ipairs(AFL.Boss and AFL.Boss.list or {}) do
+            local ok, b = pcall(bossAlive, name)
+            if ok and b then alive[#alive + 1] = name end
+        end
+        for _, name in ipairs({ "Terrorshark", "Leviathan", "Tyrant of the Skies", "Cake Prince", "Dough King" }) do
+            local ok, b = pcall(bossAlive, name)
+            if ok and b then
+                local dup = false
+                for _, x in ipairs(alive) do if x == name then dup = true end end
+                if not dup then alive[#alive + 1] = name end
+            end
+        end
+        return #alive > 0 and table.concat(alive, ", ") or "No boss alive right now"
+    end)
+
+    -- ===== INVENTÁRIO =====
+    T:AddSection("Inventory")
+    block("Items", function()
+        local items = { "Blaze Ember", "Azure Ember", "Bones", "Ectoplasm", "Mirror Fractal", "Special Microchip", "Fool's Gold", "Magnet", "Dragon Egg", "Leviathan Heart" }
+        local out = {}
+        for _, n in ipairs(items) do
+            local ok, c = pcall(AFL.Inv.count, n)
+            if ok and c and c > 0 then out[#out + 1] = n .. " x" .. c end
+        end
+        local bp = 0
+        pcall(function() bp = #Player.Backpack:GetChildren() end)
+        return (#out > 0 and table.concat(out, " | ") or "No tracked item") .. "\nBackpack tools: " .. bp .. " | Inventory: " .. tostring(AFL.Inv and AFL.Inv.state or "?")
+    end)
+
+    -- ===== atualização =====
+    local function paint(b) -- só mexe na interface quando o texto muda (poupa o celular)
+        local ok, a, c = pcall(b.fn)
+        if not ok then a = "error: " .. tostring(a) end
+        local sig
+        if b.island then sig = tostring(a and true or false) .. "|" .. tostring(c) else sig = tostring(a) end
+        if b.last == sig then return end
+        b.last = sig
+        if b.island then
+            pcall(function() b.p:SetTitle(b.island .. ": " .. (a and "SPAWNED" or "not spawned")) end)
+            pcall(function() b.p:SetDesc(c or "") end)
+        else
+            pcall(function() b.p:SetDesc(tostring(a)) end)
+        end
+    end
+    T:AddButton({ Title = "Copy status report", Description = "Copies the text shown in this tab (no script code), to send when reporting a bug", Callback = function()
+        local lines = {}
+        for _, b in ipairs(blocks) do
+            local ok, a, c = pcall(b.fn)
+            if b.island then lines[#lines + 1] = b.island .. ": " .. (a and "SPAWNED" or "not spawned") .. " - " .. tostring(c)
+            else lines[#lines + 1] = "[" .. b.title .. "]\n" .. tostring(ok and a or "error") end
+        end
+        local okc = pcall(function() setclipboard(table.concat(lines, "\n")) end)
+        Fluent:Notify({ Title = "Moon Hub", Content = okc and "Status report copied." or "Your executor can't copy to the clipboard.", Duration = 4 })
+    end })
+    task.spawn(function()
+        while Alive do
+            for _, b in ipairs(blocks) do
+                paint(b)
+                task.wait()
+            end
+            task.wait(AFL.mobile and 2 or 0.8)
+        end
+    end)
+end)()
+
+-- ---------- Sea Events extras: Kitsune Island + Leviathan (base: Banana Hub) ----------
+;(function()
+    local T = Tabs.Sea
+    local SE = {}
+    AFL.SeaEv = SE
+    local RS = game:GetService("ReplicatedStorage")
+    local function d(k, v) if Config[k] == nil then Config[k] = v end end
+    d("KitTP", false); d("KitSpawn", false); d("KitSummon", false); d("KitCollect", false); d("KitTrade", false); d("KitAzure", 10)
+    d("LevSpy", false); d("LevFind", false); d("LevSpeed", 300); d("LevBack", true); d("LevStart", false); d("LevTP", false); d("LevBoatTo", false)
+    d("LevAttack", false); d("LevFruit", true); d("LevDragon", false); d("LevGuitar", false); d("LevSkills", false); d("LevHeart", false)
+    d("LevFast", true); d("LevHold", 0.3); d("LevWeapons", { ["Blox Fruit"] = true })
+    d("LevKeys", { Melee = { Z = true, X = true, C = true }, ["Blox Fruit"] = { Z = true, X = true, C = true, V = true, F = true }, Sword = { Z = true, X = true }, Gun = { Z = true, X = true } })
+    SE.kit, SE.lev = "idle", "idle"
+
+    -- ===== helpers =====
+    local function commF() local r = RS:FindFirstChild("Remotes"); return r and r:FindFirstChild("CommF_") end
+    local function net(name)
+        local m = RS:FindFirstChild("Modules"); local n = m and m:FindFirstChild("Net")
+        return n and n:FindFirstChild(name)
+    end
+    local function raidTimer()
+        local ok, v = pcall(function() return Player.PlayerGui.Main.TopHUDList.RaidTimer.Visible end)
+        return ok and v
+    end
+    local function loc(name)
+        local w = workspace:FindFirstChild("_WorldOrigin")
+        local l = w and w:FindFirstChild("Locations")
+        return l and l:FindFirstChild(name)
+    end
+    local function busy(text)
+        State.Mode, State.Text = "Sea Event", text
+    end
+    local function near(a, b) return (a - b).Magnitude end
+    local function isMine(b)
+        local o = b:FindFirstChild("Owner")
+        return o and (o.Value == Player or tostring(o.Value) == Player.Name)
+    end
+    local function myBoat()
+        local _, hrp, hum = getChar()
+        if not hum then return end
+        local sp = hum.SeatPart
+        if sp and sp:IsA("VehicleSeat") then
+            local b = sp:FindFirstAncestorOfClass("Model")
+            if b then return b, sp end
+        end
+        local f = workspace:FindFirstChild("Boats")
+        if f then
+            for _, b in ipairs(f:GetChildren()) do
+                if b:IsA("Model") and isMine(b) then
+                    local seat = b:FindFirstChild("VehicleSeat") or b:FindFirstChildWhichIsA("VehicleSeat", true)
+                    if seat then return b, seat end
+                end
+            end
+        end
+    end
+    local BUY = { ["Beast Hunter"] = "BeastHunter", Guardian = "Guardian", Lantern = "Lantern", Sleigh = "Sleigh", Brigade = "PirateBrigade", ["Grand Brigade"] = "PirateGrandBrigade" }
+    local buyAt = 0
+    local function buyBoat()
+        local _, hrp = getChar()
+        if not hrp then return false end
+        local dealer = Vector3.new(-13.488, 10.31, 2927.692)
+        if near(hrp.Position, dealer) > 8 then flyTo(CFrame.new(dealer)); return true end
+        if os.clock() - buyAt > 5 then
+            buyAt = os.clock()
+            local cf = commF()
+            if cf then pcall(function() cf:InvokeServer("BuyBoat", BUY[Config.SeaBoat or "Brigade"] or "PirateBrigade") end) end
+        end
+        return true
+    end
+    -- barco: tween do VehicleSeat (como o Banana)
+    local btw, btarget
+    local function stopBoat() if btw then pcall(function() btw:Cancel() end); btw = nil; btarget = nil end end
+    local function boatTo(seat, pos, speed)
+        Config.SeaSitUntil = os.clock() + 1.5
+        if btw and btarget and near(btarget, pos) < 40 and btw.PlaybackState == Enum.PlaybackState.Playing then return end
+        stopBoat()
+        local dist = near(seat.Position, pos)
+        if dist < 5 then return end
+        local look = CFrame.lookAt(seat.Position, Vector3.new(pos.X, seat.Position.Y, pos.Z))
+        btarget = pos
+        btw = TweenService:Create(seat, TweenInfo.new(dist / math.max(speed, 50), Enum.EasingStyle.Linear), { CFrame = CFrame.new(pos) * (look - look.Position) })
+        btw:Play()
+    end
+    -- senta no barco (vai até o assento)
+    local function seatUp(boat, seat)
+        local _, hrp, hum = getChar()
+        if not hrp then return false end
+        if hum.SeatPart == seat then Config.SeaSitUntil = os.clock() + 1.5; return true end
+        local dist = near(hrp.Position, seat.Position)
+        if dist > 15 then flyTo(seat.CFrame + Vector3.new(0, 3, 0)) else hrp.CFrame = seat.CFrame + Vector3.new(0, 2, 0) end
+        return false
+    end
+    local function stepBoatNoclip(boat)
+        pcall(function()
+            for _, p in ipairs(boat:GetDescendants()) do if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end end
+        end)
+    end
+
+    -- ===================== KITSUNE ISLAND =====================
+    local function kitIsland()
+        local map = workspace:FindFirstChild("Map")
+        local k = map and map:FindFirstChild("KitsuneIsland")
+        if not k then return end
+        local ok, en = pcall(function() return k.ShrineDialogPart.ProximityPrompt.Enabled end)
+        return k, ok and en
+    end
+    local function shrinePos(k)
+        local s = k:FindFirstChild("ShrineInactive") or k:FindFirstChild("ShrineActive")
+        if s then local ok, p = pcall(function() return s:GetPivot().Position end); if ok then return p end end
+        local p = k:FindFirstChild("ShrineDialogPart"); return p and p.Position
+    end
+    local function ember()
+        for _, m in ipairs(workspace:GetChildren()) do
+            if m.Name == "EmberTemplate" then
+                local p = m:FindFirstChild("Part")
+                if p then return p end
+            end
+        end
+    end
+    local function night() local t = game:GetService("Lighting").ClockTime; return t >= 18 or t < 5.5 end
+    local kitAt = 0
+    function SE.kitStep()
+        if not (Config.KitTP or Config.KitSpawn or Config.KitSummon or Config.KitCollect or Config.KitTrade) then return false end
+        if getSea() ~= 3 then SE.kit = "Kitsune only works in Sea 3"; return false end
+        local char, hrp, hum = getChar()
+        if not hrp or hum.Health <= 0 then return false end
+        local timer = raidTimer()
+        local k, active = kitIsland()
+        local L = loc("Kitsune Island")
+        -- 1) coletar Soul Ember durante o evento
+        if Config.KitCollect and timer then
+            local e = ember()
+            busy("Collecting Soul Ember")
+            if e then
+                SE.kit = "collecting an ember"
+                if near(hrp.Position, e.Position) > 100 then flyTo(e.CFrame) else hrp.CFrame = e.CFrame end
+            elseif L then
+                SE.kit = "no ember visible: going to the island"
+                flyTo(L.CFrame + Vector3.new(0, 30, 0))
+            end
+            return true
+        end
+        -- 2) trocar Azure Ember
+        if Config.KitTrade and k and not timer and AFL.Inv.count("Azure Ember") >= (tonumber(Config.KitAzure) or 10) then
+            local sp = shrinePos(k)
+            if sp then
+                busy("Trading Azure Ember")
+                if near(hrp.Position, sp) > 12 then flyTo(CFrame.new(sp + Vector3.new(0, 3, 0))); SE.kit = "going to the shrine to trade" return true end
+                if os.clock() - kitAt > 5 then
+                    kitAt = os.clock()
+                    local r = net("RF/KitsuneStatuePray")
+                    if r then pcall(function() r:InvokeServer() end) end
+                end
+                SE.kit = "trading Azure Ember"
+                return true
+            end
+        end
+        -- 3) acender o santuário (Summon Soul Ember)
+        if Config.KitSummon and k and active and not timer then
+            local sp = shrinePos(k)
+            if sp then
+                busy("Summoning Soul Ember")
+                if near(hrp.Position, sp) >= 10 then flyTo(CFrame.new(sp + Vector3.new(0, 3, 0))); SE.kit = "going to the shrine" return true end
+                if os.clock() - kitAt > 5 then
+                    kitAt = os.clock()
+                    local r = net("RE/TouchKitsuneStatue")
+                    if r then pcall(function() r:FireServer() end) end
+                end
+                SE.kit = "touching the statue"
+                return true
+            end
+        end
+        -- 4) teleportar até a ilha
+        if Config.KitTP and L then
+            busy("Going to Kitsune Island")
+            SE.kit = "teleporting to the island"
+            if near(hrp.Position, L.Position) > 60 then flyTo(L.CFrame + Vector3.new(0, 30, 0)) end
+            return true
+        end
+        -- 5) criar a ilha: mesma lógica do Auto Sea Events (Select Zones): navega até a zona e espera lá
+        if Config.KitSpawn and not k then
+            busy("Looking for Kitsune Island")
+            SE.kit = "sailing like Sea Events (zone " .. tostring(Config.SeaZone) .. ") | " .. tostring(Diag.sea)
+            if Sea.step(not Config.SeaOn) then return true end
+        end
+        SE.kit = "idle"
+        return false
+    end
+
+    -- ===================== LEVIATHAN =====================
+    local START = Vector3.new(-32975.99, 160, 25963.71)
+    local HEADING = (Vector3.new(-118834.5, 160, 1e8) - START).Unit
+    local backing = false
+    local levAt, spyAt = 0, 0
+    local function levTarget()
+        local f = workspace:FindFirstChild("SeaBeasts")
+        if not f then return end
+        local function hp(m) local h = m:FindFirstChild("Health"); return h and tonumber(h.Value) or 0 end
+        for _, m in ipairs(f:GetChildren()) do
+            if m.Name == "Leviathan Tail" and m:GetAttribute("HealthEnabled") and hp(m) > 0 then return m end
+        end
+        for _, m in ipairs(f:GetChildren()) do
+            if m.Name == "Leviathan" and not m:GetAttribute("Armored") and hp(m) > 0 then return m end
+        end
+        for _, m in ipairs(f:GetChildren()) do
+            if m.Name == "Leviathan Segment" and hp(m) > 0 then return m end
+        end
+    end
+    local function watcher()
+        for _, root in ipairs({ workspace:FindFirstChild("NPCs"), RS:FindFirstChild("NPCs") }) do
+            local n = root and root:FindFirstChild("Frozen Watcher")
+            if n and n:FindFirstChild("HumanoidRootPart") then return n end
+        end
+    end
+    local WEAPONS, SKEYS = { "Melee", "Blox Fruit", "Sword", "Gun" }, { "Z", "X", "C", "V", "F" }
+    local skillBusy = false
+    -- skills: equipa cada arma escolhida e aperta as teclas dela, com a mira (Mouse.Hit) cravada no alvo
+    local function skillWorker(hit)
+        if skillBusy then return end
+        skillBusy = true
+        task.spawn(function()
+            pcall(function()
+                for _, tip in ipairs(WEAPONS) do
+                    if Alive and Config.LevWeapons[tip] and hit and hit.Parent then
+                        Config.SeaTool = { tip = tip }
+                        Config.SeaUntil = os.clock() + 1.5
+                        pcall(equipWeapon)
+                        task.wait(0.25)
+                        for _, k in ipairs(SKEYS) do
+                            local ks = Config.LevKeys[tip]
+                            if Alive and ks and ks[k] and hit.Parent then
+                                Config.SeaUntil = os.clock() + 1.5
+                                pcall(AFL.tvHook)
+                                AFL.TV.aimPos, AFL.TV.aimPart = hit.Position, hit
+                                local kc = Enum.KeyCode[k]
+                                VirtualInputManager:SendKeyEvent(true, kc, false, game)
+                                task.wait(Config.LevFast and 0.05 or (tonumber(Config.LevHold) or 0.3))
+                                VirtualInputManager:SendKeyEvent(false, kc, false, game)
+                                task.wait(0.15)
+                            end
+                        end
+                    end
+                end
+            end)
+            AFL.TV.aimPos, AFL.TV.aimPart = nil, nil
+            skillBusy = false
+        end)
+    end
+    local function attackLev(t)
+        local char, hrp, hum = getChar()
+        local root = t:FindFirstChild("HumanoidRootPart") or t.PrimaryPart
+        local hit = t:FindFirstChild("Hitbox11") or root
+        if not (root and hit) then return false end
+        busy("Leviathan: " .. t.Name)
+        SE.lev = "attacking " .. t.Name
+        if hum.Sit then hum.Sit = false end
+        local stand = Vector3.new(root.Position.X, 142, root.Position.Z)
+        if near(hrp.Position, stand) > 12 then flyTo(CFrame.new(stand)) else
+            if currentTween then currentTween:Cancel() end
+            hrp.CFrame = CFrame.lookAt(stand, hit.Position)
+            hrp.AssemblyLinearVelocity = Vector3.zero
+        end
+        Aim.part, Aim.level = hit, false
+        Config.AttackUntil = os.clock() + 0.8
+        if Config.LevFruit then
+            Config.SeaTool = { tip = "Blox Fruit" }
+            Config.SeaClick = { kind = "fruit", part = hit, untilT = os.clock() + 0.8 }
+            pcall(equipWeapon)
+        elseif Config.LevDragon then
+            Config.SeaTool = { name = "dragonstorm" }
+            Config.SeaClick = { kind = "ds", part = hit, untilT = os.clock() + 0.8 }
+            pcall(equipWeapon)
+        elseif Config.LevGuitar then
+            Config.SeaTool = { name = "skull guitar" }
+            Config.SeaClick = { kind = "sg", part = hit, untilT = os.clock() + 0.8 }
+            pcall(equipWeapon)
+        elseif Config.LevSkills then
+            Config.SeaClick = nil
+            skillWorker(hit)
+        end
+        return true
+    end
+    local function heartStep(boat, seat)
+        local map = workspace:FindFirstChild("Map")
+        local heart = map and map:FindFirstChild("FrozenHeart")
+        if not heart then return false end
+        local ins = heart:FindFirstChild("Inside")
+        if ins and ins:GetAttribute("Harpooned") then SE.lev = "the heart was already harpooned"; return false end
+        local cube = heart:FindFirstChild("Cube")
+        if not (cube and boat and seat and boat:FindFirstChild("Harpoon")) then SE.lev = "heart: needs your Beast Hunter boat"; return false end
+        busy("Shooting the Frozen Heart")
+        local _, hrp, hum = getChar()
+        stepBoatNoclip(boat)
+        local spot = Vector3.new(cube.Position.X, seat.Position.Y, cube.Position.Z + 300)
+        if near(seat.Position, spot) > 5 and not (hum.SeatPart and hum.SeatPart.Name == "Seat") then
+            if hum.SeatPart ~= seat then seatUp(boat, seat); SE.lev = "heart: getting on the boat"; return true end
+            SE.lev = "heart: sailing to the heart"
+            boatTo(seat, spot, 150)
+            return true
+        end
+        stopBoat()
+        pcall(function() boat:PivotTo(CFrame.lookAt(boat:GetPivot().Position, Vector3.new((ins or cube).Position.X, boat:GetPivot().Position.Y, (ins or cube).Position.Z))) end)
+        local hs = boat.Harpoon:FindFirstChild("Seat")
+        if hs and hum.SeatPart ~= hs then flyTo(hs.CFrame + Vector3.new(0, 2, 0)); if near(hrp.Position, hs.Position) < 15 then hrp.CFrame = hs.CFrame + Vector3.new(0, 2, 0) end; SE.lev = "heart: going to the harpoon"; return true end
+        if os.clock() - levAt > 1.5 then
+            levAt = os.clock()
+            local cf = commF()
+            if cf then pcall(function() cf:InvokeServer("FireHarpoon", 0.7853981633974483, 0.00044342573293783646, boat.Harpoon, workspace:GetServerTimeNow()) end) end
+        end
+        SE.lev = "heart: firing the harpoon"
+        return true
+    end
+    function SE.levStep()
+        if not (Config.LevSpy or Config.LevFind or Config.LevStart or Config.LevTP or Config.LevBoatTo or Config.LevAttack or Config.LevHeart) then return false end
+        if getSea() ~= 3 then SE.lev = "Leviathan only works in Sea 3"; return false end
+        local char, hrp, hum = getChar()
+        if not hrp or hum.Health <= 0 then return false end
+        local FD = loc("Frozen Dimension")
+        -- espião: libera a informação do Leviathan
+        if Config.LevSpy and not FD and os.clock() - spyAt > 25 then
+            spyAt = os.clock()
+            local cf = commF()
+            if cf then task.spawn(function() pcall(function() cf:InvokeServer("InfoLeviathan", "1"); cf:InvokeServer("InfoLeviathan", "2") end) end) end
+        end
+        -- 1) atacar
+        if Config.LevAttack then
+            local t = levTarget()
+            if t and attackLev(t) then return true end
+        end
+        -- 2) arpão no coração
+        if Config.LevHeart then
+            local boat, seat = myBoat()
+            if heartStep(boat, seat) then return true end
+        end
+        -- 3) Frozen Watcher: abrir o portão / teleportar
+        if FD and (Config.LevStart or Config.LevTP) then
+            local w = watcher()
+            if w then
+                busy("Frozen Watcher")
+                local p = w.HumanoidRootPart.Position
+                if near(hrp.Position, p) >= 8 then SE.lev = "going to the Frozen Watcher"; flyTo(w.HumanoidRootPart.CFrame) return true end
+                if Config.LevStart and os.clock() - levAt > 3 then
+                    levAt = os.clock()
+                    local cf = commF()
+                    if cf then pcall(function() cf:InvokeServer("OpenLeviathanGate") end) end
+                    SE.lev = "opening the gate"
+                end
+                return true
+            end
+        end
+        -- 4) levar o barco até a Frozen Dimension
+        if FD and Config.LevBoatTo then
+            local boat, seat = myBoat()
+            if boat and near(seat.Position, FD.Position) > 400 then
+                busy("Sailing to the Frozen Dimension")
+                if not seatUp(boat, seat) then SE.lev = "getting on the boat"; return true end
+                stepBoatNoclip(boat)
+                SE.lev = "sailing to the Frozen Dimension"
+                boatTo(seat, Vector3.new(FD.Position.X, seat.Position.Y, FD.Position.Z), tonumber(Config.LevSpeed) or 300)
+                return true
+            end
+        end
+        -- 5) procurar: mesma lógica do Auto Sea Events (Select Zones, Fly Boat, Speed, Back 10k)
+        if Config.LevFind and not FD then
+            busy("Looking for the Frozen Dimension")
+            SE.lev = "sailing like Sea Events (zone " .. tostring(Config.SeaZone) .. ") | " .. tostring(Diag.sea)
+            if Sea.step(not Config.SeaOn) then return true end
+        end
+        if FD then SE.lev = "Frozen Dimension is open" else SE.lev = "idle" end
+        return false
+    end
+
+    -- ===== UI =====
+    local function tg(id, title, desc)
+        T:AddToggle(id, { Title = title, Description = desc, Default = Config[id] and true or false }):OnChanged(function(v)
+            Config[id] = v
+            if not v then stopBoat() end
+            persist()
+        end)
+    end
+    T:AddSection("Kitsune Island")
+    tg("KitTP", "Teleport To Kitsune Island", "Flies to the island when it exists")
+    tg("KitSpawn", "Auto Spawn Kitsune Island", "Sails exactly like Auto Sea Events: goes to the selected zone and waits there for the island")
+    tg("KitSummon", "Auto Summon Soul Ember", "Goes to the shrine and touches the statue to start the Azure Ember event")
+    tg("KitCollect", "Auto Collect Soul Ember", "During the event, grabs every Soul Ember")
+    T:AddSlider("KitAzure", { Title = "Values Azure Ember", Description = "Trade when you have at least this many", Min = 0, Max = 25, Default = tonumber(Config.KitAzure) or 10, Rounding = 0 })
+        :OnChanged(function(v) Config.KitAzure = math.floor(v); persist() end)
+    tg("KitTrade", "Auto Trade Azure Ember", "Prays at the shrine when you have enough Azure Ember")
+    local ki = T:AddParagraph({ Title = "Kitsune", Content = "..." })
+    T:AddSection("Leviathan")
+    tg("LevSpy", "Auto Buy Spy", "Asks the spy for the Leviathan info now and then while the Frozen Dimension is not open")
+    tg("LevFind", "Auto Find Leviathan", "Sails exactly like Auto Sea Events: uses Select Zones, Fly Boat, Speed Boat and the Sea options above (buys the boat if needed)")
+    T:AddSlider("LevSpeed", { Title = "Speed Boat To Frozen Dimension", Description = "Only for the Tween Boat / Heart steps", Min = 50, Max = 500, Default = math.clamp(tonumber(Config.LevSpeed) or 300, 50, 500), Rounding = 0 })
+        :OnChanged(function(v) Config.LevSpeed = math.floor(v); persist() end)
+    tg("LevBoatTo", "Tween Boat To Frozen Dimension", "Sails the boat to the Frozen Dimension once it exists")
+    tg("LevTP", "Teleport Frozen Dimension", "Goes to the Frozen Watcher")
+    tg("LevStart", "Auto Start Leviathan", "At the Frozen Watcher, opens the Leviathan gate")
+    tg("LevAttack", "Auto Attack Leviathan", "Kills the tail first, then the body, then the segments, from 142 studs above, with the attack chosen below")
+    tg("LevFruit", "Attack Leviathan (M1 Fruit)", "Fruit M1, auto-aimed. Priority: M1 Fruit > Dragonstorm > Skull Guitar > Skills")
+    tg("LevDragon", "Attack Leviathan Dragonstorm", "Dragonstorm remote shot, auto-aimed (no clicking on the screen)")
+    tg("LevGuitar", "Attack Leviathan Skull Guitar", "Skull Guitar remote shot, auto-aimed")
+    tg("LevSkills", "Attack Leviathan Skills", "Used when no M1 above is on: equips each weapon below and presses its skills on the target")
+    T:AddSection("Leviathan Skills")
+    local function multi(v)
+        local set = {}
+        if type(v) == "table" then for k, val in pairs(v) do if val == true then set[k] = true elseif type(val) == "string" then set[val] = true end end end
+        return set
+    end
+    local wd = T:AddDropdown("LevWeaponsDD", { Title = "Select Weapons Use Skills", Values = WEAPONS, Multi = true, Default = { ["Blox Fruit"] = true } })
+    wd:OnChanged(function(v) Config.LevWeapons = multi(v); persist() end)
+    for _, tip in ipairs(WEAPONS) do
+        local def = {}
+        for k in pairs(Config.LevKeys[tip] or {}) do def[k] = true end
+        T:AddDropdown("LevKeys" .. tip, { Title = "Skills: " .. tip, Description = "Keys pressed with this weapon", Values = (tip == "Blox Fruit") and SKEYS or { "Z", "X", "C", "V" }, Multi = true, Default = def })
+            :OnChanged(function(v) Config.LevKeys[tip] = multi(v); persist() end)
+    end
+    tg("LevFast", "Use skill fast (don't hold)", "Taps each key quickly. Off: holds it for the time below")
+    T:AddSlider("LevHold", { Title = "Skill Hold Time (s)", Min = 0, Max = 3, Default = tonumber(Config.LevHold) or 0.3, Rounding = 1 })
+        :OnChanged(function(v) Config.LevHold = v; persist() end)
+    T:AddSection("Leviathan Heart")
+    tg("LevHeart", "Auto Fire Shoot Heart Leviathan", "Uses your Beast Hunter boat harpoon on the Frozen Heart")
+    local li = T:AddParagraph({ Title = "Leviathan", Content = "..." })
+    task.spawn(function()
+        while Alive do
+            pcall(function()
+                local k, active = kitIsland()
+                ki:SetDesc("Now: " .. tostring(SE.kit) .. "\nIsland: " .. (k and (active and "ready" or "found (shrine busy)") or "not found") .. " | Azure Ember: " .. tostring(AFL.Inv.count("Azure Ember")) .. " | Event: " .. (raidTimer() and "running" or "off"))
+                li:SetDesc("Now: " .. tostring(SE.lev) .. "\nFrozen Dimension: " .. (loc("Frozen Dimension") and "open" or "not found") .. " | Leviathan: " .. (levTarget() and "alive" or "none"))
+            end)
+            task.wait(1.5)
+        end
+    end)
+end)()
+
+-- ---------- Interface: redimensionar como uma aba do Chrome + zoom + animações ----------
+;(function()
+    local T = Tabs.Script
+    local root = Window and Window.Root
+    if not root then return end
+    local TweenSvc, UIS = game:GetService("TweenService"), UserInputService
+    local function d(k, v) if Config[k] == nil then Config[k] = v end end
+    d("UIScale", 1); d("UIAspect", "Free"); d("UIAnimStyle", "Smooth"); d("UIAnim", true); d("UIAnimSpeed", 1); d("UIW", 0); d("UIH", 0); d("UILock", false)
+    local DEF_W, DEF_H = 540, 440
+    -- celular/tablet: sem teclado, só toque
+    local touch = UIS.TouchEnabled and not UIS.KeyboardEnabled
+    AFL.mobile = touch or Config.MobileMode == true
+    local MIN_W, MIN_H = 380, 300
+    if AFL.mobile then MIN_W, MIN_H = 300, 210 end
+    local sc = root:FindFirstChild("MHScale")
+    local function S() return tonumber(AFL.uiScale) or 1 end
+    local function viewport() local c = workspace.CurrentCamera; return c and c.ViewportSize or Vector2.new(1280, 720) end
+
+    local function setSize(w, h, cx, cy)
+        local s = S()
+        local vp = viewport()
+        w = math.clamp(w, MIN_W, math.max(MIN_W, vp.X / s - 10))
+        h = math.clamp(h, MIN_H, math.max(MIN_H, vp.Y / s - 10))
+        root.Size = UDim2.fromOffset(w, h)
+        pcall(function() Window.Size = UDim2.fromOffset(w, h) end)
+        if cx then
+            root.Position = UDim2.fromOffset(cx, cy)
+            pcall(function() Window.Position = root.Position end)
+        end
+        Config.UIW, Config.UIH = math.floor(w), math.floor(h)
+        return w, h
+    end
+    -- tamanho salvo
+    if (tonumber(Config.UIW) or 0) >= MIN_W and (tonumber(Config.UIH) or 0) >= MIN_H then
+        pcall(function() setSize(Config.UIW, Config.UIH) end)
+    end
+    -- cabe na tela? (celular em paisagem tem ~360-430 px de altura): reduz zoom/tamanho e centraliza; refaz ao girar a tela
+    local function fitToScreen(first)
+        pcall(function()
+            local vp = viewport()
+            if first and AFL.mobile and (tonumber(Config.UIScale) or 1) == 1 and vp.Y < 430 and (tonumber(Config.UIW) or 0) == 0 then
+                AFL.uiScale = 0.85; Config.UIScale = 0.85
+                if sc then sc.Scale = 0.85 end
+            end
+            local s = S()
+            local w, h = root.Size.X.Offset, root.Size.Y.Offset
+            setSize(math.min(w, vp.X / s - 14), math.min(h, vp.Y / s - 14))
+            -- janela inteira dentro da tela
+            local cw, ch = root.Size.X.Offset * s, root.Size.Y.Offset * s
+            local p = root.Position
+            local cx = math.clamp(p.X.Offset, cw / 2 + 4, math.max(cw / 2 + 4, vp.X - cw / 2 - 4))
+            local cy = math.clamp(p.Y.Offset, ch / 2 + 4, math.max(ch / 2 + 4, vp.Y - ch / 2 - 4))
+            if p.X.Scale == 0 and p.Y.Scale == 0 then
+                root.Position = UDim2.fromOffset(cx, cy)
+                pcall(function() Window.Position = root.Position end)
+            end
+        end)
+    end
+    fitToScreen(true)
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then table.insert(Connections, cam:GetPropertyChangedSignal("ViewportSize"):Connect(function() task.defer(fitToScreen, false) end)) end
+    end)
+    -- some o canto invisível padrão do Fluent (20x20): os novos handles substituem ele
+    pcall(function()
+        for _, c in ipairs(root:GetChildren()) do
+            if c:IsA("Frame") and c.Size == UDim2.fromOffset(20, 20) and c.Position == UDim2.new(1, -20, 1, -20) then c.Visible = false end
+        end
+    end)
+
+    -- ===== handles nas bordas e cantos =====
+    local holder = Instance.new("Frame")
+    holder.Name, holder.BackgroundTransparency, holder.Size, holder.ZIndex = "MHResize", 1, UDim2.fromScale(1, 1), 200
+    holder.Active = false
+    holder.Parent = root
+    local drag
+    local E, C = 7, 16
+    if AFL.mobile then E, C = 14, 26 end
+    -- dx/dy: quanto cada eixo muda o tamanho (+1 direita/baixo, -1 esquerda/cima)
+    local defs = {
+        { "R",  UDim2.new(1, -E, 0, C),  UDim2.new(0, E, 1, -2 * C), 1, 0 },
+        { "L",  UDim2.new(0, 0, 0, C),   UDim2.new(0, E, 1, -2 * C), -1, 0 },
+        { "B",  UDim2.new(0, C, 1, -E),  UDim2.new(1, -2 * C, 0, E), 0, 1 },
+        { "T",  UDim2.new(0, C, 0, 0),   UDim2.new(1, -2 * C, 0, E), 0, -1 },
+        { "BR", UDim2.new(1, -C, 1, -C), UDim2.fromOffset(C, C), 1, 1 },
+        { "BL", UDim2.new(0, 0, 1, -C),  UDim2.fromOffset(C, C), -1, 1 },
+        { "TR", UDim2.new(1, -C, 0, 0),  UDim2.fromOffset(C, C), 1, -1 },
+        { "TL", UDim2.new(0, 0, 0, 0),   UDim2.fromOffset(C, C), -1, -1 },
+    }
+    for _, df in ipairs(defs) do
+        local h = Instance.new("TextButton")
+        h.Name, h.Text, h.AutoButtonColor = "H" .. df[1], "", false
+        h.Position, h.Size, h.ZIndex = df[2], df[3], 200
+        h.BackgroundColor3, h.BackgroundTransparency, h.BorderSizePixel = Color3.fromRGB(255, 255, 255), 1, 0
+        h.Parent = holder
+        Instance.new("UICorner", h).CornerRadius = UDim.new(0, 4)
+        h.MouseEnter:Connect(function()
+            if Config.UILock then return end
+            TweenSvc:Create(h, TweenInfo.new(0.15, Enum.EasingStyle.Quint), { BackgroundTransparency = 0.8 }):Play()
+        end)
+        h.MouseLeave:Connect(function()
+            if drag and drag.h == h then return end
+            TweenSvc:Create(h, TweenInfo.new(0.2, Enum.EasingStyle.Quint), { BackgroundTransparency = 1 }):Play()
+        end)
+        h.InputBegan:Connect(function(i)
+            if Config.UILock then return end
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                drag = { h = h, sx = df[4], sy = df[5], start = i.Position, w = root.Size.X.Offset, hh = root.Size.Y.Offset,
+                    cx = root.Position.X.Offset, cy = root.Position.Y.Offset, input = i }
+                h.BackgroundTransparency = 0.6
+            end
+        end)
+    end
+    -- alça visual no canto inferior direito
+    do
+        local g = Instance.new("TextLabel")
+        g.Name, g.BackgroundTransparency, g.Text, g.TextSize = "Grip", 1, "◢", 14
+        g.Font, g.TextColor3, g.TextTransparency, g.ZIndex = Enum.Font.GothamBold, Color3.fromRGB(180, 200, 220), 0.55, 201
+        g.Size, g.Position, g.Active = UDim2.fromOffset(14, 14), UDim2.new(1, -16, 1, -16), false
+        g.Parent = holder
+    end
+    table.insert(Connections, UIS.InputChanged:Connect(function(i)
+        if not drag then return end
+        if i.UserInputType ~= Enum.UserInputType.MouseMovement and i.UserInputType ~= Enum.UserInputType.Touch then return end
+        local s = S()
+        local dx, dy = (i.Position.X - drag.start.X), (i.Position.Y - drag.start.Y)
+        local w = drag.w + drag.sx * dx / s
+        local h = drag.hh + drag.sy * dy / s
+        local vp = viewport()
+        local ratio = AFL.uiRatio and AFL.uiRatio(drag)
+        if ratio then
+            if drag.sx ~= 0 then h = w / ratio else w = h * ratio end
+        end
+        local cw = math.clamp(w, MIN_W, math.max(MIN_W, vp.X / s - 10))
+        local ch = math.clamp(h, MIN_H, math.max(MIN_H, vp.Y / s - 10))
+        if ratio then
+            if math.abs(cw / ch - ratio) > 0.01 then
+                if drag.sx ~= 0 then cw = math.clamp(ch * ratio, MIN_W, math.max(MIN_W, vp.X / s - 10)) else ch = math.clamp(cw / ratio, MIN_H, math.max(MIN_H, vp.Y / s - 10)) end
+            end
+        end
+        -- a borda oposta fica parada: o centro anda metade da variação real
+        local cx = drag.cx + drag.sx * (cw - drag.w) * s / 2
+        local cy = drag.cy + drag.sy * (ch - drag.hh) * s / 2
+        setSize(cw, ch, cx, cy)
+    end))
+    table.insert(Connections, UIS.InputEnded:Connect(function(i)
+        if drag and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            local h = drag.h
+            drag = nil
+            TweenSvc:Create(h, TweenInfo.new(0.25, Enum.EasingStyle.Quint), { BackgroundTransparency = 1 }):Play()
+            persist()
+        end
+    end))
+
+    local RATIOS = { ["16:10"] = 16 / 10, ["4:3"] = 4 / 3, ["3:2"] = 3 / 2, ["1:1"] = 1, ["5:4"] = 5 / 4 }
+    AFL.uiRatio = function(dr)
+        local a = Config.UIAspect
+        if a == "Keep current" then return dr.w / dr.hh end
+        return RATIOS[a]
+    end
+    -- ===== UI =====
+    local function tweenScale(v)
+        AFL.uiScale = v
+        Config.UIScale = v
+        if sc and sc.Parent and not Window.Minimized then
+            TweenSvc:Create(sc, TweenInfo.new(0.3 / (tonumber(Config.UIAnimSpeed) or 1), Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Scale = v }):Play()
+        end
+    end
+    T:AddSection("Interface")
+    local sldS = T:AddSlider("UIScaleSlider", { Title = "Interface Zoom", Description = "Like browser zoom: scales the whole window (50% - 140%)", Min = 50, Max = 140,
+        Default = math.floor((tonumber(Config.UIScale) or 1) * 100 + 0.5), Rounding = 0 })
+    sldS:OnChanged(function(v) tweenScale(math.clamp(v / 100, 0.5, 1.4)); persist() end)
+    local presets = { Small = { 460, 350 }, Default = { DEF_W, DEF_H }, Large = { 720, 520 }, Huge = { 920, 620 } }
+    T:AddDropdown("UISizePreset", { Title = "Window Size", Description = "Quick sizes. You can also drag any edge or corner of the window to resize it",
+        Values = { "Small", "Default", "Large", "Huge" }, Default = 2 }):OnChanged(function(v)
+        local p = presets[v]
+        if p then
+            local s = S()
+            local w0, h0 = root.Size.X.Offset, root.Size.Y.Offset
+            local nw, nh = math.clamp(p[1], MIN_W, math.max(MIN_W, viewport().X / s - 10)), math.clamp(p[2], MIN_H, math.max(MIN_H, viewport().Y / s - 10))
+            -- anima o tamanho
+            local t0 = os.clock()
+            local dur = 0.3 / (tonumber(Config.UIAnimSpeed) or 1)
+            task.spawn(function()
+                while Alive do
+                    local a = math.clamp((os.clock() - t0) / dur, 0, 1)
+                    a = 1 - (1 - a) ^ 4
+                    setSize(w0 + (nw - w0) * a, h0 + (nh - h0) * a)
+                    if a >= 1 then break end
+                    RunService.RenderStepped:Wait()
+                end
+                persist()
+            end)
+        end
+    end)
+    local syncing = false
+    local sw = T:AddSlider("UIWidth", { Title = "Window Width", Min = MIN_W, Max = 1400, Default = math.clamp(root.Size.X.Offset, MIN_W, 1400), Rounding = 0 })
+    local sh = T:AddSlider("UIHeight", { Title = "Window Height", Min = MIN_H, Max = 900, Default = math.clamp(root.Size.Y.Offset, MIN_H, 900), Rounding = 0 })
+    sw:OnChanged(function(v) if syncing then return end; setSize(v, root.Size.Y.Offset) end)
+    sh:OnChanged(function(v) if syncing then return end; setSize(root.Size.X.Offset, v) end)
+    T:AddDropdown("UIAspect", { Title = "Window Proportion", Description = "Locks the shape while you resize: Free, Keep current, or a fixed ratio",
+        Values = { "Free", "Keep current", "16:10", "4:3", "3:2", "5:4", "1:1" }, Default = (function() for i, v in ipairs({ "Free", "Keep current", "16:10", "4:3", "3:2", "5:4", "1:1" }) do if v == Config.UIAspect then return i end end return 1 end)() })
+        :OnChanged(function(v) Config.UIAspect = v; persist() end)
+    task.spawn(function() -- mantém os sliders em dia com o arraste
+        while Alive do
+            task.wait(0.5)
+            if not drag then
+                syncing = true
+                pcall(function()
+                    if math.abs(sw.Value - root.Size.X.Offset) > 2 then sw:SetValue(math.floor(root.Size.X.Offset)) end
+                    if math.abs(sh.Value - root.Size.Y.Offset) > 2 then sh:SetValue(math.floor(root.Size.Y.Offset)) end
+                end)
+                syncing = false
+            end
+        end
+    end)
+    T:AddToggle("MobileMode", { Title = "Mobile Mode (lighter UI)", Description = "Bigger touch handles, fewer animations and slower status refresh. Turns on by itself on phones/tablets", Default = AFL.mobile and true or false })
+        :OnChanged(function(v) Config.MobileMode = v; AFL.mobile = v or touch; persist() end)
+    T:AddToggle("UILock", { Title = "Lock Window Size", Description = "Turns the edge/corner resizing off", Default = Config.UILock and true or false })
+        :OnChanged(function(v) Config.UILock = v; holder.Visible = not v; persist() end)
+    holder.Visible = not Config.UILock
+    T:AddButton({ Title = "Reset Window Size and Zoom", Description = "Back to the default size (540x440) and 100% zoom", Callback = function()
+        pcall(function() sldS:SetValue(100) end)
+        tweenScale(1)
+        setSize(DEF_W, DEF_H)
+        persist()
+    end })
+    T:AddSection("Animations")
+    T:AddToggle("UIAnim", { Title = "Smooth Animations", Description = "Window open/close and tab transitions", Default = Config.UIAnim ~= false })
+        :OnChanged(function(v) Config.UIAnim = v; persist() end)
+    T:AddDropdown("UIAnimStyle", { Title = "Animation Style", Description = "Smooth (default), Soft, Snappy or Bouncy",
+        Values = { "Smooth", "Soft", "Snappy", "Bouncy" }, Default = (function() for i, v in ipairs({ "Smooth", "Soft", "Snappy", "Bouncy" }) do if v == Config.UIAnimStyle then return i end end return 1 end)() })
+        :OnChanged(function(v) Config.UIAnimStyle = v; persist() end)
+    T:AddSlider("UIAnimSpeed", { Title = "Animation Speed", Description = "1.0 = normal; lower = slower and softer, higher = quicker", Min = 0.5, Max = 2, Default = tonumber(Config.UIAnimSpeed) or 1, Rounding = 1 })
+        :OnChanged(function(v) Config.UIAnimSpeed = v; persist() end)
+end)()
+
+-- ---------- Diagnóstico (aba Script Settings) ----------
+;(function()
+    local T = Tabs.Script
+    T:AddSection("Diagnostics")
+    local errP = T:AddParagraph({ Title = "Errors", Content = "No errors." })
+    local capP = T:AddParagraph({ Title = "Executor support", Content = "Checking..." })
+    local function log()
+        local out = {}
+        for _, e in ipairs(AFL.Err.list) do out[#out + 1] = string.format("[%s] %s: %s", e.t, e.key, e.msg) end
+        return table.concat(out, "\n")
+    end
+    T:AddButton({ Title = "Copy error log", Description = "Copies the last errors so you can send them to the developer", Callback = function()
+        local ok = pcall(function() setclipboard(log() ~= "" and log() or "no errors") end)
+        Fluent:Notify({ Title = "Moon Hub", Content = ok and "Error log copied." or "Your executor can't copy to the clipboard.", Duration = 4 })
+    end })
+    T:AddButton({ Title = "Clear errors", Callback = function() AFL.Err.list = {}; AFL.Err.quar = {}; AFL.Err.count = {} end })
+    local function yn(v) return v and "yes" or "NO" end
+    task.spawn(function()
+        while Alive do
+            pcall(function()
+                local L = AFL.Err.list
+                if #L == 0 then errP:SetDesc("No errors.") else
+                    local out = {}
+                    for i = math.max(1, #L - 4), #L do out[#out + 1] = string.format("[%s] %s: %s", L[i].t, L[i].key, string.sub(L[i].msg, 1, 140)) end
+                    local paused = {}
+                    for k, t in pairs(AFL.Err.quar) do if t > os.clock() then paused[#paused + 1] = k end end
+                    if #paused > 0 then out[#out + 1] = "Paused: " .. table.concat(paused, ", ") end
+                    errP:SetDesc(table.concat(out, "\n"))
+                end
+                capP:SetDesc(table.concat({
+                    "Mouse hook (Silent aim, skill aim): " .. yn(hookmetamethod ~= nil),
+                    "Drawing (FOV circle, aim line): " .. yn(Drawing ~= nil and Drawing.new ~= nil),
+                    "Clipboard: " .. yn(setclipboard ~= nil),
+                    "Inventory read: " .. tostring(AFL.Inv and AFL.Inv.state or "?"),
+                }, "\n"))
+            end)
+            task.wait(2)
+        end
+    end)
+end)()
+
 -- ---------- ESP ----------
 do
     local T = Tabs.ESP
@@ -7717,24 +10243,42 @@ do
     end)
 
     T:AddSection("Movement")
-    local ws, jp = 16, 50
+    local ws, jp = tonumber(Config.PvpWS) or 16, tonumber(Config.PvpJP) or 50
     local wsOn, jpOn = false, false
-    T:AddInput("PvpWalkSpeed", { Title = "Input WalkSpeed", Default = "16", Numeric = true, Finished = true, Placeholder = "16" }):OnChanged(function(v) ws = tonumber(v) or 16 end)
-    T:AddToggle("PvpWalkSpeedOn", { Title = "Change WalkSpeed", Default = false }):OnChanged(function(v) wsOn = v end)
-    T:AddInput("PvpJumpPower", { Title = "Input JumpPower", Default = "50", Numeric = true, Finished = true, Placeholder = "50" }):OnChanged(function(v) jp = tonumber(v) or 50 end)
-    T:AddToggle("PvpJumpPowerOn", { Title = "Change JumpPower", Default = false }):OnChanged(function(v) jpOn = v end)
-    task.spawn(function()
-        while Alive do
-            local _, _, hum = getChar()
-            if hum then
-                if wsOn then pcall(function() hum.WalkSpeed = ws end) end
-                if jpOn then pcall(function() hum.UseJumpPower = true; hum.JumpPower = jp end) end
-            end
-            task.wait(0.3)
-        end
+    -- Input sem "Finished": aplica enquanto digita (antes só valia depois do Enter). A cada frame + sinal de mudança, porque o jogo reescreve o WalkSpeed o tempo todo.
+    T:AddInput("PvpWalkSpeed", { Title = "Input WalkSpeed", Default = tostring(ws), Numeric = true, Placeholder = "16" }):OnChanged(function(v) ws = tonumber(v) or 16; Config.PvpWS = ws end)
+    T:AddToggle("PvpWalkSpeedOn", { Title = "Change WalkSpeed", Default = false }):OnChanged(function(v)
+        wsOn = v
+        if not v then local _, _, hum = getChar(); if hum then pcall(function() hum.WalkSpeed = 16 end) end end
     end)
+    T:AddInput("PvpJumpPower", { Title = "Input JumpPower", Default = tostring(jp), Numeric = true, Placeholder = "50" }):OnChanged(function(v) jp = tonumber(v) or 50; Config.PvpJP = jp end)
+    T:AddToggle("PvpJumpPowerOn", { Title = "Change JumpPower", Default = false }):OnChanged(function(v)
+        jpOn = v
+        if not v then local _, _, hum = getChar(); if hum then pcall(function() hum.JumpPower = 50 end) end end
+    end)
+    local hooked = setmetatable({}, { __mode = "k" })
+    local function applyMove(hum)
+        if wsOn and hum.WalkSpeed ~= ws then hum.WalkSpeed = ws end
+        if jpOn then
+            if not hum.UseJumpPower then hum.UseJumpPower = true end
+            if hum.JumpPower ~= jp then hum.JumpPower = jp end
+        end
+    end
+    table.insert(Connections, RunService.Heartbeat:Connect(function()
+        if not Alive or not (wsOn or jpOn) then return end
+        local c = Player.Character
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        pcall(applyMove, hum)
+        if not hooked[hum] then
+            hooked[hum] = true
+            for _, prop in ipairs({ "WalkSpeed", "JumpPower", "UseJumpPower" }) do
+                pcall(function() hum:GetPropertyChangedSignal(prop):Connect(function() pcall(applyMove, hum) end) end)
+            end
+        end
+    end))
 
-    -- Walk On Water: invisible platform under the feet while above the sea
+    -- Walk On Water (igual ao Banana): plataforma invisível sob os pés em Y = -5 enquanto você está na faixa do mar (Y de -120 a 0)
     local plat
     local water = false
     T:AddToggle("WalkWater", { Title = "Walk On Water", Description = "You walk on top of the sea", Default = Config.WalkWater and true or false }):OnChanged(function(v)
@@ -7742,32 +10286,28 @@ do
         if not v and plat then pcall(function() plat:Destroy() end); plat = nil end
     end)
     water = Config.WalkWater and true or false
-    task.spawn(function()
-        while Alive do
-            if water then
-                local _, hrp, hum = getChar()
-                if hrp then
-                    if not (plat and plat.Parent) then
-                        plat = Instance.new("Part")
-                        plat.Name = "MHWaterWalk"
-                        plat.Size = Vector3.new(60, 1, 60)
-                        plat.Transparency = 1
-                        plat.Anchored = true
-                        plat.Parent = workspace
-                    end
-                    local wy = -5
-                    pcall(function()
-                        local pl = workspace.Map:FindFirstChild("WaterBase-Plane")
-                        if pl and pl:IsA("BasePart") then wy = pl.Position.Y + pl.Size.Y / 2 end
-                    end)
-                    local sitting = hum and hum.Sit
-                    plat.CanCollide = (not sitting) and hrp.Position.Y > wy and hrp.Position.Y - wy < 60
-                    plat.CFrame = CFrame.new(hrp.Position.X, wy - 0.5, hrp.Position.Z)
-                end
-            end
-            task.wait(0.1)
+    table.insert(Connections, RunService.Heartbeat:Connect(function()
+        if not (Alive and water) then return end
+        local _, hrp, hum = getChar()
+        if not hrp then return end
+        if not (plat and plat.Parent) then
+            plat = Instance.new("Part")
+            plat.Name = "MHWaterWalk"
+            plat.Size = Vector3.new(2048, 1, 2048)
+            plat.Transparency = 1
+            plat.Anchored = true
+            plat.CanCollide = false
+            plat.Parent = workspace
         end
-    end)
+        local y = hrp.Position.Y
+        local sitting = hum and hum.Sit
+        if sitting or y > 0 or y < -120 then
+            plat.CanCollide = false
+        else
+            plat.CanCollide = true
+            plat.CFrame = CFrame.new(hrp.Position.X, -5, hrp.Position.Z)
+        end
+    end))
     T:AddSection("PVP Status")
     local pinfo = T:AddParagraph({ Title = "PVP", Content = "Checking..." })
     task.spawn(function()
@@ -7785,40 +10325,6 @@ do
     end)
 end
 
-do
-    local A = Tabs.Aimbot
-    A:AddSection("Aimbot Configs")
-    local AIM_URL = "https://api.luarmor.net/files/v4/loaders/0c7ea360c9bca139fc70fff09aad7d8b.lua"
-    local loaded, status = false, "not loaded"
-    A:AddToggle("PvpAimbot", { Title = "Auto Aimbot", Description = "Loads the external PVP / Aimbot script (third party, Blox Fruits only). It cannot be unloaded: it stays active until you rejoin", Default = false }):OnChanged(function(v)
-        if not v or loaded then return end
-        if game.GameId ~= 994732206 then
-            Fluent:Notify({ Title = "Moon Hub", Content = "The Aimbot / PVP script only supports Blox Fruits.", Duration = 5 })
-            return
-        end
-        loaded = true
-        status = "loading..."
-        task.spawn(function()
-            local ok, err = pcall(function() loadstring(game:HttpGet(AIM_URL))() end)
-            status = ok and "loaded (active until you rejoin)" or ("failed: " .. tostring(err))
-            if not ok then
-                loaded = false
-                warn("[Moon Hub] PVP script failed: " .. tostring(err))
-                Fluent:Notify({ Title = "Moon Hub", Content = "The PVP script failed to load (see the console).", Duration = 6 })
-            end
-        end)
-    end)
-    A:AddSection("Aimbot Status")
-    local ainfo = A:AddParagraph({ Title = "Aimbot", Content = "Checking..." })
-    task.spawn(function()
-        while Alive do
-            pcall(function()
-                ainfo:SetDesc("Game: " .. (game.GameId == 994732206 and "Blox Fruits (supported)" or "not supported") .. "\nScript: " .. status)
-            end)
-            task.wait(1.5)
-        end
-    end)
-end
 
 do
     -- Anti AFK
@@ -7866,8 +10372,16 @@ do
     local TweenService = game:GetService("TweenService")
     local UIS = game:GetService("UserInputService")
     local root = Window and Window.Root
+    -- estilos de animação escolhidos pelo jogador (Interface > Animation Style)
+    AFL.animStyle = function(dir)
+        local st = Config.UIAnimStyle or "Smooth"
+        local map = { Smooth = { In = Enum.EasingStyle.Quart, Out = Enum.EasingStyle.Quint }, Bouncy = { In = Enum.EasingStyle.Back, Out = Enum.EasingStyle.Back },
+            Snappy = { In = Enum.EasingStyle.Expo, Out = Enum.EasingStyle.Expo }, Soft = { In = Enum.EasingStyle.Sine, Out = Enum.EasingStyle.Sine } }
+        return (map[st] or map.Smooth)[dir or "Out"]
+    end
     local function tw(inst, t, props, style, dir)
-        local tween = TweenService:Create(inst, TweenInfo.new(t, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out), props)
+        local dur = (Config.UIAnim == false) and 0.001 or (t / math.clamp(tonumber(Config.UIAnimSpeed) or 1, 0.3, 3))
+        local tween = TweenService:Create(inst, TweenInfo.new(dur, style or AFL.animStyle("Out"), dir or Enum.EasingDirection.Out), props)
         tween:Play()
         return tween
     end
@@ -7885,7 +10399,8 @@ do
             end
         end)
         local sc = root:FindFirstChild("MHScale") or Instance.new("UIScale")
-        sc.Name, sc.Scale = "MHScale", 1
+        AFL.uiScale = math.clamp(tonumber(Config.UIScale) or 1, 0.5, 1.4)
+        sc.Name, sc.Scale = "MHScale", AFL.uiScale
         sc.Parent = root
         local orig = Window.Minimize
         local busy = false
@@ -7896,14 +10411,14 @@ do
                 local args = table.pack(...)
                 local closing = not self.Minimized
                 if closing then
-                    local t = tw(sc, 0.16, { Scale = 0.88 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+                    local t = tw(sc, 0.2, { Scale = 0.9 * AFL.uiScale }, AFL.animStyle("In"), Enum.EasingDirection.In)
                     t.Completed:Wait()
                     pcall(orig, self, table.unpack(args, 1, args.n))
-                    sc.Scale = 1
+                    sc.Scale = AFL.uiScale
                 else
-                    sc.Scale = 0.88
+                    sc.Scale = 0.9 * AFL.uiScale
                     pcall(orig, self, table.unpack(args, 1, args.n))
-                    tw(sc, 0.3, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+                    tw(sc, 0.42, { Scale = AFL.uiScale }, AFL.animStyle("Out"), Enum.EasingDirection.Out)
                 end
                 busy = false
             end
@@ -7916,9 +10431,9 @@ do
             local us = Instance.new("UIScale")
             us.Name, us.Scale, us.Parent = "MHPageScale", 1, sf
             sf:GetPropertyChangedSignal("Visible"):Connect(function()
-                if sf.Visible then
-                    us.Scale = 0.94
-                    tw(us, 0.26, { Scale = 1 }, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+                if sf.Visible and not AFL.mobile then
+                    us.Scale = 0.965
+                    tw(us, 0.34, { Scale = 1 }, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
                 end
             end)
         end
@@ -8061,14 +10576,14 @@ do
         ["Water"]      = { base = "Darker", mul = 1.8, tint = Color3.fromRGB(190, 228, 252), tintA = 0.5, glass = 0.985, corner = 18,
                            stroke = Color3.fromRGB(235, 248, 255), thick = 2, strokeT = 0.1, acrylic = true },
     }
-    -- Variações do Water (vidro transparente colorido)
-    local function glass(tint, stroke, tintA) return { base = "Darker", mul = 1.8, tint = tint, tintA = tintA or 0.5, glass = 0.985, corner = 18,
-        stroke = stroke, thick = 2, strokeT = 0.1, acrylic = true } end
-    THEMES["Ocean"]        = glass(Color3.fromRGB(40, 120, 205), Color3.fromRGB(120, 190, 255), 0.55)
-    THEMES["Ice"]          = glass(Color3.fromRGB(225, 246, 255), Color3.fromRGB(255, 255, 255), 0.6)
-    THEMES["Aqua Mint"]    = glass(Color3.fromRGB(110, 230, 200), Color3.fromRGB(200, 255, 240), 0.5)
-    THEMES["Sakura Glass"] = glass(Color3.fromRGB(255, 170, 210), Color3.fromRGB(255, 225, 240), 0.5)
-    THEMES["Violet Glass"] = glass(Color3.fromRGB(165, 125, 255), Color3.fromRGB(220, 200, 255), 0.5)
+    -- Variações do Water: vidro colorido (fundo na cor do tema, meio transparente) com borda mais escura
+    local function glass(tint, stroke, tintA, gl) return { base = "Darker", mul = 1.8, tint = tint, tintA = tintA or 0.85, glass = gl or 0.35, corner = 18,
+        stroke = stroke, thick = 3, strokeT = 0, acrylic = true } end
+    THEMES["Ocean"]        = glass(Color3.fromRGB(0, 195, 235), Color3.fromRGB(8, 45, 140), 0.88, 0.3)
+    THEMES["Ice"]          = glass(Color3.fromRGB(190, 235, 255), Color3.fromRGB(70, 125, 190), 0.85, 0.3)
+    THEMES["Aqua Mint"]    = glass(Color3.fromRGB(60, 215, 170), Color3.fromRGB(8, 105, 85), 0.88, 0.3)
+    THEMES["Sakura Glass"] = glass(Color3.fromRGB(255, 140, 195), Color3.fromRGB(165, 45, 105), 0.88, 0.3)
+    THEMES["Violet Glass"] = glass(Color3.fromRGB(150, 100, 255), Color3.fromRGB(65, 30, 145), 0.88, 0.3)
     -- Variações do Full Black (sólido, escuro, borda colorida)
     local function dark(tint, tintA, stroke, title, sub, mul) return { base = "Darker", mul = mul or 0.35, strokeMul = 1.1, solid = true, corner = 18,
         tint = tint, tintA = tintA, stroke = stroke, thick = 4, strokeT = 0, acrylic = false, title = title, titleStroke = BLACK, sub = sub } end
