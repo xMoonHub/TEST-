@@ -2497,8 +2497,8 @@ local function bossAlive(name) return findEnemy({ name }) end
 -- v22: sem mob carregado, ele PATRULHA (pontos de spawn do Tiki ou um anel em volta) em vez de ficar parado.
 AFL.Tiki = { pos = nil, at = -1e9, since = 0, last = 0 }
 AFL.TikiMobs = { "Isle Outlaw", "Island Boy", "Sun-kissed Warrior", "Isle Champion", "Serpent Hunter", "Skull Slayer" }
--- Última quest da ilha Tiki (nome/índice NÃO confirmados no jogo: TikiQuest3 #2 = Skull Slayer). O NPC é procurado perto do Tiki.
-AFL.TikiQuest = Q(2450, 9999, "TikiQuest3", 2, { "Skull Slayer", "Serpent Hunter" })
+-- Última quest da ilha Tiki (TikiQuest3 #2, nível 2575: confirmado no Banana Hub). O NPC é procurado perto do Tiki.
+AFL.TikiQuest = Q(2575, 9999, "TikiQuest3", 2, { "Skull Slayer", "Serpent Hunter" })
 AFL.TikiQuest.bypass = true
 function AFL.tikiNpcCF(loc)
     local npcs = workspace:FindFirstChild("NPCs")
@@ -4589,8 +4589,10 @@ do
 end
 
 -- ============ FEATURES / PRIORITIES ============
-AFL.FeatOrder = { "Fruit", "Gacha", "Raid", "Mirage", "Vulcan", "Sea", "Pirate", "Elite", "Factory", "Chest", "Secret", "Boss", "Awk", "Tyrant", "DoughKill", "DoughSpawn", "Normal" }
+AFL.FeatOrder = { "Dungeon", "Fruit", "Gacha", "Raid", "Mirage", "Vulcan", "Sea", "Pirate", "Elite", "Factory", "Chest", "Secret", "Boss", "Awk", "Tyrant", "DoughKill", "DoughSpawn", "Normal" }
 AFL.feat = {
+    Dungeon = { label = "Auto Dungeon", boss = true, listed = function() return Config.DunFarm or Config.DunJoin end, on = function() return Config.DunFarm or Config.DunJoin end,
+        run = function() return AFL.Dun and AFL.Dun.step() end },
     Fruit = { label = "Auto Collect Fruit", boss = true, listed = function() return Config.CollectFruits end, on = function() return Config.CollectFruits end,
         run = function()
             local fruit = findGroundFruit()
@@ -4666,7 +4668,7 @@ AFL.feat = {
     Normal = { label = "Normal Farm", hidden = true, listed = function() return false end, on = function() return true end,
         run = function() normalStep() return State.Busy end },
 }
-AFL.featKey = { ["Auto Collect Fruit"] = "Fruit", ["Sea Events"] = "Sea", ["Auto Pirate Raid"] = "Pirate",
+AFL.featKey = { ["Auto Dungeon"] = "Dungeon", ["Auto Collect Fruit"] = "Fruit", ["Sea Events"] = "Sea", ["Auto Pirate Raid"] = "Pirate",
     ["Auto Elite Hunter"] = "Elite", ["Auto Factory"] = "Factory", ["Auto Farm Chest"] = "Chest", ["Auto Kill Boss"] = "Boss", ["Auto Awk Boss"] = "Awk", ["Auto Mirage"] = "Mirage", ["Auto Farm Vulcan"] = "Vulcan",
     ["Auto Kill Tyrant of the Skies"] = "Tyrant", ["Auto Spawn Tyrant of the Skies"] = "Tyrant",
     ["Auto Kill Dough Prince"] = "DoughKill", ["Auto Spawn Dough Prince"] = "DoughSpawn" }
@@ -4810,7 +4812,7 @@ local saveAll, persist
 do
 local HttpService = game:GetService("HttpService")
 local SAVE_FILE = "MoonHub_KeyPro.json"
-local SAVED_KEYS = { "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
+local SAVED_KEYS = { "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
     "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones",
     "Weapon", "AttackMode", "Bring", "TweenSpeed", "AutoBuso", "AutoKen", "AutoV3", "AutoV4",
     "RemoveFog", "FpsBooster", "ToggleKey",
@@ -4824,6 +4826,7 @@ Config.EliteQuest = true
 Config.KillAll = true -- farms de quest matam TODOS os NPCs da ilha (não só o tipo da quest)
 Config.KillAllSkip = { "Deandre", "Urban", "Diablo", "Tyrant", "Dough King", "Cake Prince", "Soul Reaper", "Core", "Darkbeard", "Order", "Greybeard", "Rip_Indra", "Cursed Captain", "Terrorshark", "Sea Beast", "Leviathan" }
 Config.Theme = "Default"
+Config.DunDiff, Config.DunMin, Config.DunStart, Config.DunFollow, Config.DunJoin, Config.DunWeapon, Config.DunFarm, Config.DunCard = "Normal", 1, true, "None", false, "Melee", false, true
 Config.AutoTeam = true
 Config.SecretOn, Config.SecretSel = false, {}
 Config.Prio = {}
@@ -5638,11 +5641,64 @@ do
         end
         return (store and keys and cfg) and true or false
     end
+    -- Método principal (Quantum Onyx): remote GetAllItemValues devolve {ItemId, NetworkedUID, Key, Value}; o nome vem do ItemConfig
+    local netMod
+    local function viaRemote()
+        if not netMod then
+            local mods = RS:FindFirstChild("Modules")
+            local nf = mods and mods:FindFirstChild("Net")
+            netMod = nf and try(function() return require(nf) end)
+        end
+        local cfg2 = cfg
+        if not cfg2 then
+            local ms = RS:FindFirstChild("ItemConfig")
+            cfg2 = ms and try(function() return require(ms) end)
+            cfg = cfg2 or cfg
+        end
+        if not (netMod and cfg2) then return nil, "Net/ItemConfig missing" end
+        local ok, res = pcall(function() return netMod:RemoteFunction("GetAllItemValues"):InvokeServer() end)
+        if not ok or type(res) ~= "table" then return nil, "GetAllItemValues failed: " .. tostring(res) end
+        local by, rows = {}, 0
+        for _, r in next, res do
+            rows += 1
+            local k = tostring(r.ItemId) .. "_" .. tostring(r.NetworkedUID)
+            by[k] = by[k] or { id = r.ItemId, at = {} }
+            if r.Value ~= nil then by[k].at[r.Key] = r.Value end
+        end
+        local m, n = {}, 0
+        for _, it in next, by do
+            local okc, conf = pcall(function() return cfg2.match(it.id):unwrap() end)
+            local names = {}
+            if okc and conf then
+                local dl = conf.Index and conf.Index.DebugLabel
+                if dl then dl = tostring(dl); names[#names + 1] = dl:match("^(.-)%s*%[") or dl end
+                local d = conf.Display and conf.Display.Name
+                if d then names[#names + 1] = tostring(d) end
+                local sk = conf.Index and conf.Index.StorageKey
+                if sk then names[#names + 1] = tostring(sk) end
+            end
+            local q = tonumber(it.at.Quantity)
+            if not q and it.at.IsOwned == true then q = 1 end
+            if q and q > 0 and #names > 0 then
+                n += 1
+                for _, nm in ipairs(names) do
+                    m[nm] = math.max(m[nm] or 0, q)
+                    local nk = "#" .. string.lower(string.gsub(nm, "[^%w]", ""))
+                    m[nk] = math.max(m[nk] or 0, q)
+                end
+            end
+        end
+        if n == 0 then return nil, "GetAllItemValues returned " .. rows .. " rows but no item matched" end
+        return m, n .. " items read (GetAllItemValues)"
+    end
     function I.refresh()
         if os.clock() - I.at < 4 then return end
         I.at = os.clock()
+        local m0, st0 = viaRemote()
+        if m0 then I.map, I.state = m0, st0 return end
+        I.remoteErr = st0
         if not discover() then
-            I.state = string.format("module not found (store=%s keys=%s config=%s)", tostring(store ~= nil), tostring(keys ~= nil), tostring(cfg ~= nil))
+            I.state = string.format("module not found (store=%s keys=%s config=%s) | remote: %s", tostring(store ~= nil), tostring(keys ~= nil), tostring(cfg ~= nil), tostring(I.remoteErr))
             return
         end
         local m, n = {}, 0
@@ -6023,6 +6079,7 @@ addTab("Stack",    "Stack Farm",      "layers")
 addTab("Bosses",  "Bosses",          "skull")
 addTab("Fruits",   "Fruits",          "apple")
 addTab("Raid",     "Raid",            "shield")
+addTab("Dungeons", "Dungeons",        "door-open")
 addTab("Sea",      "Sea Events",      "waves")
 addTab("Vulcan",   "Vulcan",          "flame")
 addTab("ESP",      "ESP",             "eye")
@@ -6273,7 +6330,7 @@ Tabs.Script:AddToggle("EventNotify", { Title = "Event Notifications", Descriptio
 
 Tabs.Script:AddSection("Scripts Themes")
 do
-local ThemeValues = { "Default", "White", "Full Black", "Water", "Lagartixa Goat", "Hacker Matrix", "Windows Retro", "Halloween" }
+local ThemeValues = { "Default", "White", "Full Black", "Water", "Ocean", "Ice", "Aqua Mint", "Sakura Glass", "Violet Glass", "Midnight", "Carbon", "Blood Black", "Neon Cyan Black", "Royal Black", "Lagartixa Goat", "Hacker Matrix", "Windows Retro", "Halloween" }
 if Config.Theme == "Super Black" then Config.Theme = "Full Black" end
 local ThemeDefault = 1
 for i, n in ipairs(ThemeValues) do if n == Config.Theme then ThemeDefault = i end end
@@ -6865,6 +6922,600 @@ do
     tg("VulcBone", "Auto Collect Bone", "Collects the bones that fall around the volcano")
 end
 
+-- ---------- Dungeons ----------
+-- Base: NightDungeon (andar/lutar/escolher cartas dentro da dungeon) + Banana Hub (entrar no pad, dificuldade, min. de jogadores, conta que inicia).
+;(function()
+    local T = Tabs.Dungeons
+    local RS = game:GetService("ReplicatedStorage")
+    local TweenSvc = game:GetService("TweenService")
+    local PlayersSvc = game:GetService("Players")
+    local RunSvc = game:GetService("RunService")
+    local D = {}
+    AFL.Dun = D
+    local S = { stage = "Idle", floor = 0, maxFloor = 0, dead = 0, total = 0, left = 0, runs = 0, kills = 0, energy = 0, target = "-", buffs = {} }
+    D.s = S
+    local CFG = { hover = 250, kill = 82, bossKill = 88, speed = 180, arrive = 14, jump = 400, rescue = 6000, hit = 100,
+        atkDelay = 0.07, buffDelay = 0.45, floorH = 90, door = 30, propHP = 5000, propR = 700, stall = 5 }
+    local function cfgv(k, d) if Config[k] == nil then Config[k] = d end end
+    cfgv("DunDiff", "Normal"); cfgv("DunMin", 1); cfgv("DunWeapon", "Melee"); cfgv("DunCost", 10)
+
+    local function char() local c = Player.Character; return (c and c.Parent and c:FindFirstChild("HumanoidRootPart")) and c or nil end
+    local function hrpf() local c = char(); return c and c:FindFirstChild("HumanoidRootPart") end
+    local function humf() local c = char(); return c and c:FindFirstChildOfClass("Humanoid") end
+    local function inHub() return workspace:GetAttribute("IsDungeonHub") == true or D.padsFolder() ~= nil end
+    local function inRun() return workspace:GetAttribute("IsDungeonInstance") == true or Player:GetAttribute("ExplorerGUID") ~= nil end
+    function D.padsFolder()
+        local map = workspace:FindFirstChild("Map")
+        if not map then return nil end
+        local hub = map:FindFirstChild("Simulation Hub")
+        return (hub and hub:FindFirstChild("Pads")) or map:FindFirstChild("Pads")
+    end
+    local function stage(t) S.stage = t; State.Mode, State.Text = "Auto Dungeon", t; Diag.dungeon = t end
+
+    -- ===== movimento (hover alto + tween), igual ao NightDungeon =====
+    local target, tween, tgoal, hb, nc, lastPos, rescueUntil, hover = nil, nil, nil, nil, nil, nil, 0, false
+    local function cancelTween() if tween then pcall(function() tween:Cancel() end); tween = nil end end
+    local function velocity(on)
+        local c = char(); if not c then return end
+        local head = c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart")
+        if not head then return end
+        local bv = head:FindFirstChild("MHDunVel")
+        if on and not bv then
+            bv = Instance.new("BodyVelocity")
+            bv.Name, bv.MaxForce, bv.Velocity, bv.P = "MHDunVel", Vector3.new(40000, 40000, 40000), Vector3.zero, 1500
+            bv.Parent = head
+        elseif not on and bv then bv:Destroy() end
+    end
+    local function noclip(on)
+        if on and not nc then
+            nc = RunSvc.Stepped:Connect(function()
+                local c = char(); if not c then return end
+                for _, p in ipairs(c:GetDescendants()) do if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end end
+            end)
+        elseif not on and nc then nc:Disconnect(); nc = nil end
+    end
+    local function stepTo(cf)
+        local hrp, hum = hrpf(), humf()
+        if not hrp or not hum or hum.Health <= 0 then cancelTween(); return false end
+        if hum.Sit then hum.Sit = false end
+        local dist = (cf.Position - hrp.Position).Magnitude
+        if dist <= CFG.arrive then cancelTween(); return true end
+        if tween and tgoal and (tgoal.Position - cf.Position).Magnitude < 6 and tween.PlaybackState == Enum.PlaybackState.Playing then return false end
+        local sp = os.clock() < rescueUntil and CFG.rescue or CFG.speed
+        cancelTween()
+        tgoal = cf
+        tween = TweenSvc:Create(hrp, TweenInfo.new(math.max(dist / sp, 0.05), Enum.EasingStyle.Linear), { CFrame = cf })
+        tween:Play()
+        return false
+    end
+    local function heartbeat(on)
+        if on and not hb then
+            lastPos = nil
+            hb = RunSvc.Heartbeat:Connect(function()
+                if not target then return end
+                local hrp, hum = hrpf(), humf()
+                if not hrp or not hum or hum.Health <= 0 then lastPos = nil; return end
+                local pos = hrp.Position
+                if lastPos and (pos - lastPos).Magnitude > CFG.jump then
+                    cancelTween()
+                    target = CFrame.new(pos.X, pos.Y + CFG.hover, pos.Z)
+                    lastPos = pos
+                    return
+                end
+                lastPos = pos
+                if hrp.AssemblyAngularVelocity.Magnitude > 0.05 then hrp.AssemblyAngularVelocity = Vector3.zero end
+                if hum:GetState() ~= Enum.HumanoidStateType.Physics then hum:ChangeState(Enum.HumanoidStateType.Physics) end
+                if hum.PlatformStand then hum.PlatformStand = false end
+                velocity(true)
+                stepTo(target)
+            end)
+        elseif not on and hb then hb:Disconnect(); hb = nil; cancelTween(); lastPos = nil end
+    end
+    local function goto_(cf)
+        local hrp, hum = hrpf(), humf()
+        if not hrp or not hum or hum.Health <= 0 then cancelTween(); return false end
+        noclip(true); velocity(true); hover = false
+        if not target or (target.Position - cf.Position).Magnitude > 1 then target = cf end
+        heartbeat(true)
+        return (cf.Position - hrp.Position).Magnitude <= CFG.arrive
+    end
+    local function hoverHigh(force)
+        local hrp = hrpf(); if not hrp then return end
+        if hover and target and hb and not force then noclip(true); velocity(true); return end
+        cancelTween()
+        local p = hrp.Position
+        if p.Y < -100 then p = D.lastGood or p end
+        target = CFrame.new(p.X, p.Y + CFG.hover, p.Z)
+        noclip(true); velocity(true); heartbeat(true)
+        hover = true
+        stage("Hovering up high")
+    end
+    function D.halt()
+        heartbeat(false); noclip(false); velocity(false)
+        target, hover, D.active, D.atk = nil, false, false, false
+    end
+
+    -- ===== inimigos =====
+    local folders, foldersAt, deepAt = {}, 0, 0
+    local function scanFolders()
+        if os.clock() - foldersAt < 3 and #folders > 0 then return end
+        foldersAt = os.clock()
+        local list, seen = {}, {}
+        local function add(f) if f and f.Parent and not seen[f] then seen[f] = true; list[#list + 1] = f end end
+        add(workspace:FindFirstChild("Enemies"))
+        for _, ch in ipairs(workspace:GetChildren()) do
+            if ch:IsA("Folder") or ch:IsA("Model") then
+                local n = ch.Name
+                if n:find("Enem") or n:find("Mob") or n:find("Monster") then add(ch) end
+            end
+        end
+        for _, f in ipairs(folders) do add(f) end
+        if os.clock() - deepAt > 12 then
+            deepAt = os.clock()
+            local map = workspace:FindFirstChild("Map")
+            local dg = map and map:FindFirstChild("Dungeon")
+            if dg then
+                for _, fl in ipairs(dg:GetChildren()) do
+                    for _, d in ipairs(fl:GetDescendants()) do
+                        if d:IsA("Humanoid") and d.Parent and d.Parent:IsA("Model") then add(d.Parent.Parent) end
+                    end
+                end
+            end
+        end
+        folders = list
+    end
+    local function alive(m)
+        if not m or not m.Parent or m:FindFirstChild("VehicleSeat") then return false end
+        local h = m:FindFirstChild("Humanoid")
+        return h and h.Health > 0 and m:FindFirstChild("HumanoidRootPart") ~= nil
+    end
+    local mobCache, mobAt = {}, 0
+    local function mobs()
+        if os.clock() - mobAt < 0.3 then return mobCache end
+        mobAt = os.clock()
+        scanFolders()
+        local out, seen = {}, {}
+        for _, f in ipairs(folders) do
+            if f.Parent then
+                for _, m in ipairs(f:GetChildren()) do
+                    if m:IsA("Model") and not seen[m] and alive(m) and not PlayersSvc:GetPlayerFromCharacter(m) then seen[m] = true; out[#out + 1] = m end
+                end
+            end
+        end
+        mobCache = out
+        return out
+    end
+    local function isBoss(m)
+        if m:GetAttribute("IsBoss") or m:GetAttribute("Boss") or m.Name:find("Boss") or m.Name:find("Zero") then return true end
+        local h = m:FindFirstChild("Humanoid")
+        return h ~= nil and h.MaxHealth >= 250000
+    end
+    local function isProp(m)
+        if m.Name == "PropHitboxPlaceholder" then return true end
+        local hd, rt = m:FindFirstChild("Head"), m:FindFirstChild("HumanoidRootPart")
+        if hd and rt and hd:IsA("BasePart") and rt:IsA("BasePart") and hd.Size.Y <= 0.5 and rt.Size.X >= 6 then
+            local h = m:FindFirstChild("Humanoid")
+            return h ~= nil and h.MaxHealth > 0 and h.MaxHealth <= CFG.propHP
+        end
+        return false
+    end
+    local stuckM, stuckHP, stuckAt = nil, 0, 0
+    local function stalled(m)
+        local h = m and m.Parent and m:FindFirstChild("Humanoid")
+        if not h then stuckM = nil; return false end
+        if m ~= stuckM then stuckM, stuckHP, stuckAt = m, h.Health, os.clock(); return false end
+        if h.Health < stuckHP - 1 then stuckHP, stuckAt = h.Health, os.clock(); return false end
+        return os.clock() - stuckAt > CFG.stall
+    end
+    local function pickTarget()
+        local hrp = hrpf(); if not hrp then return end
+        local list = mobs()
+        local bp, bpd, bb, bbd, bn, bnd = nil, math.huge, nil, math.huge, nil, math.huge
+        for _, m in ipairs(list) do
+            local r = m.Parent and m:FindFirstChild("HumanoidRootPart")
+            if r then
+                local d = (r.Position - hrp.Position).Magnitude
+                if isProp(m) then if d < bpd then bpd, bp = d, m end
+                elseif isBoss(m) then if d < bbd then bbd, bb = d, m end
+                elseif d < bnd then bnd, bn = d, m end
+            end
+        end
+        local isB = false
+        if not (bn and bnd <= CFG.hit) and bb then isB = true; bn = bb end
+        if bp and bpd <= CFG.propR then
+            if bn == nil or stalled(bn) then return bp, false, true end
+        else stalled(bn) end
+        return bn, isB, false
+    end
+
+    -- ===== arma / ataque =====
+    local function toolByTip(tip)
+        for _, c in ipairs({ Player.Backpack, char() }) do
+            if c then for _, t in ipairs(c:GetChildren()) do if t:IsA("Tool") and t.ToolTip == tip then return t.Name end end end
+        end
+    end
+    local function wantedTool()
+        local n = toolByTip(Config.DunWeapon)
+        if n then return n, Config.DunWeapon end
+        for _, tip in ipairs({ "Melee", "Sword", "Blox Fruit", "Gun" }) do
+            n = toolByTip(tip); if n then return n, tip end
+        end
+    end
+    local function equip()
+        local c, hum = char(), humf()
+        if not c or not hum then return end
+        local name = wantedTool(); if not name then return end
+        local cur = c:FindFirstChildOfClass("Tool")
+        if cur and cur.Name == name then return end
+        local t = Player.Backpack:FindFirstChild(name)
+        if t then hum:EquipTool(t) end
+    end
+    local busoAt = 0
+    local function buso()
+        local c = char()
+        if not c or c:FindFirstChild("HasBuso") or os.clock() - busoAt < 4 then return end
+        busoAt = os.clock()
+        pcall(function() RS.Remotes.CommF_:InvokeServer("Buso") end)
+    end
+    local atkFlag, atkAt = false, 0
+    local function attackOnce()
+        local c = char(); if not c then return end
+        local tool = c:FindFirstChildOfClass("Tool"); if not tool then return end
+        local hrp = c:FindFirstChild("HumanoidRootPart"); if not hrp then return end
+        local stun = c:FindFirstChild("Stun")
+        if stun and stun.Value ~= 0 then return end
+        local hits = {}
+        for _, m in ipairs(mobs()) do
+            local r = m.Parent and m:FindFirstChild("HumanoidRootPart")
+            if r and (r.Position - hrp.Position).Magnitude <= CFG.hit then hits[#hits + 1] = { m, r } end
+        end
+        if #hits == 0 then return end
+        if tool.ToolTip == "Blox Fruit" then
+            local rem = tool:FindFirstChild("LeftClickRemote")
+            if rem and rem:IsA("RemoteEvent") then
+                rem:FireServer(Vector3.new(0, -500, 0), math.random(1, 4), true)
+                task.wait(0.01)
+                rem:FireServer(false)
+            end
+            return
+        end
+        if tool.ToolTip == "Melee" or tool.ToolTip == "Sword" then
+            local net = RS:FindFirstChild("Modules") and RS.Modules:FindFirstChild("Net")
+            local ra, rh = net and net:FindFirstChild("RE/RegisterAttack"), net and net:FindFirstChild("RE/RegisterHit")
+            if ra and rh then
+                ra:FireServer(0)
+                rh:FireServer(hits[1][2], hits)
+            end
+        end
+    end
+    task.spawn(function()
+        while Alive do
+            if atkFlag and D.active then
+                if os.clock() - atkAt > 1.2 then atkFlag = false; task.wait(0.25)
+                else pcall(attackOnce); task.wait(CFG.atkDelay) end
+            else task.wait(0.25) end
+        end
+    end)
+    local hooked = setmetatable({}, { __mode = "k" })
+    local function watchKill(m)
+        if hooked[m] then return end
+        hooked[m] = true
+        local h = m:FindFirstChild("Humanoid")
+        if h then local c; c = h.Died:Connect(function() S.kills += 1; c:Disconnect() end) end
+    end
+    local function fight(m, boss)
+        if not alive(m) then return false end
+        watchKill(m)
+        local hum = humf(); if not hum then return false end
+        if hum.Sit then hum.Sit = false end
+        local h = boss and CFG.bossKill or CFG.kill
+        local c = char()
+        local tool = c and c:FindFirstChildOfClass("Tool")
+        if tool and tool.ToolTip == "Blox Fruit" then h = 15 end
+        goto_(m.HumanoidRootPart.CFrame * CFrame.new(-3, h, 0))
+        equip(); buso()
+        atkFlag, atkAt = true, os.clock()
+        return true
+    end
+
+    -- ===== cartas (buffs) =====
+    local BUFFS = { "AttackSpeedMultiplier", "Overflow", "Lifesteal", "AllCooldown", "Unbreakable", "Fortress", "Shadow", "FruitTAPCooldown", "Armor", "Defense", "Skyjumps", "RageGain", "RaceEnergy", "Sniper", "Size" }
+    local WBUFF = { Melee = { "Melee", "MeleeCooldown", "MeleeZCooldown", "MeleeXCooldown", "MeleeCCooldown" }, Sword = { "Sword", "SwordCooldown", "SwordZCooldown", "SwordXCooldown" },
+        ["Blox Fruit"] = { "Fruit", "FruitCooldown", "FruitZCooldown", "FruitXCooldown", "FruitVCooldown", "FruitCCooldown" }, Gun = { "Gun", "GunCooldown", "GunZCooldown", "GunXCooldown" } }
+    local function rank(name)
+        for i, b in ipairs(BUFFS) do if b == name then return i end end
+        local _, tip = wantedTool()
+        for i, b in ipairs(WBUFF[tip or Config.DunWeapon] or {}) do if b == name then return #BUFFS + i end end
+        return 999
+    end
+    local cardAt = 0
+    local function hookCards()
+        if os.clock() - cardAt < 1 then return end
+        cardAt = os.clock()
+        local sh = RS:FindFirstChild("DungeonShared")
+        local sel = sh and sh:FindFirstChild("BuffSelector")
+        if sel and sel:IsA("RemoteFunction") then
+            sel.OnClientInvoke = function(list)
+                if not Config.DunCard or type(list) ~= "table" then return nil end
+                local best, br = nil, math.huge
+                for _, c in ipairs(list) do
+                    local n = type(c) == "table" and c.buffName
+                    if n then local r = rank(n); if r < br then br, best = r, n end end
+                end
+                best = best or (list[1] and list[1].buffName)
+                if not best then return nil end
+                task.wait(CFG.buffDelay)
+                return best
+            end
+        end
+        local rep = sh and sh:FindFirstChild("BuffReplicator")
+        if rep and rep:IsA("RemoteEvent") and not D.repConn then
+            D.repConn = rep.OnClientEvent:Connect(function(b) if type(b) == "table" then S.buffs = b end end)
+        end
+        for _, nm in ipairs({ "ResultsScreen", "ReturnToHub" }) do
+            local ev = sh and sh:FindFirstChild(nm)
+            if ev and ev:IsA("RemoteEvent") and not (D.endConn and D.endConn[nm]) then
+                D.endConn = D.endConn or {}
+                D.endConn[nm] = ev.OnClientEvent:Connect(function() D.finished = true; atkFlag = false end)
+            end
+        end
+    end
+
+    -- ===== andares =====
+    local function dungeonFolder() local m = workspace:FindFirstChild("Map"); return m and m:FindFirstChild("Dungeon") end
+    local function floorModel(n) local d = dungeonFolder(); return d and n and d:FindFirstChild(tostring(n)) end
+    local function floorCF(m)
+        if not m then return nil end
+        local at = m:GetAttribute("BoundingCF")
+        local p = at and at.Position
+        if not p then local ok, pv = pcall(function() return m:GetPivot().Position end); if not ok then return nil end; p = pv end
+        return CFrame.new(p.X, p.Y + CFG.floorH, p.Z)
+    end
+    local function inside(m, pos)
+        local cf, sz = m:GetAttribute("BoundingCF"), m:GetAttribute("BoundingSize")
+        if not cf or not sz then return false end
+        local o = cf:PointToObjectSpace(pos)
+        return math.abs(o.X) <= sz.X * 0.5 and math.abs(o.Y) <= sz.Y * 0.5 and math.abs(o.Z) <= sz.Z * 0.5
+    end
+    local function currentFloor()
+        local hrp, d = hrpf(), dungeonFolder()
+        if not hrp or not d then return nil end
+        local near, nd
+        for _, f in ipairs(d:GetChildren()) do
+            local n = tonumber(f.Name)
+            if n then
+                if inside(f, hrp.Position) then return n end
+                local at = f:GetAttribute("BoundingCF")
+                if at then local m = (at.Position - hrp.Position).Magnitude; if not nd or m < nd then nd, near = m, n end end
+            end
+        end
+        return near
+    end
+    local function highestFloor()
+        local d, hi = dungeonFolder(), nil
+        if not d then return nil end
+        for _, f in ipairs(d:GetChildren()) do local n = tonumber(f.Name); if n and (not hi or n > hi) then hi = n end end
+        return hi
+    end
+    local function rootOf(fl, nm)
+        local m = floorModel(fl); m = m and m:FindFirstChild(nm)
+        return m and m:FindFirstChild("Root")
+    end
+    local lastTouch = 0
+    local function touch(part)
+        if os.clock() - lastTouch < 0.6 then return end
+        lastTouch = os.clock()
+        local hrp = hrpf()
+        if hrp and part and type(firetouchinterest) == "function" then
+            pcall(firetouchinterest, hrp, part, 0); task.wait(); pcall(firetouchinterest, hrp, part, 1)
+        end
+    end
+    local runInfo, runAt = nil, 0
+    local function findRun()
+        if runInfo and runInfo.Parent and runInfo:GetAttribute("CurrentExploredLevel") ~= nil then return runInfo end
+        runInfo = nil
+        if not inRun() or os.clock() - runAt < 3 then return nil end
+        runAt = os.clock()
+        local function look(root, depth)
+            for _, c in ipairs(root:GetChildren()) do if c:GetAttribute("CurrentExploredLevel") ~= nil then return c end end
+            if depth <= 0 then return nil end
+            for _, c in ipairs(root:GetChildren()) do
+                if (c:IsA("Folder") or c:IsA("Configuration")) and not ({ Map = 1, Camera = 1, Terrain = 1, Enemies = 1, Characters = 1, Debris = 1, Effect = 1, Sounds = 1 })[c.Name] then
+                    local r = look(c, depth - 1); if r then return r end
+                end
+            end
+        end
+        runInfo = look(workspace, 2) or look(RS, 2)
+        return runInfo
+    end
+    local function runStep()
+        local info = findRun()
+        hookCards()
+        if info then
+            S.floor = info:GetAttribute("CurrentExploredLevel") or 0
+            S.dead, S.total, S.left = info:GetAttribute("DeadEnemies") or 0, info:GetAttribute("TotalEnemies") or 0, info:GetAttribute("TimeLeft") or 0
+            local fl = info:FindFirstChild("Floors")
+            if fl then local hi = 0; for _, c in ipairs(fl:GetChildren()) do local n = tonumber(c.Name); if n and n > hi then hi = n end end; S.maxFloor = hi end
+        end
+        if D.finished then stage("Finished: waiting to return to the hub"); hoverHigh(); return end
+        local hum = humf()
+        if not hum or hum.Health <= 0 then stage("Waiting to respawn"); return end
+        local m, boss, prop = pickTarget()
+        if m then
+            local hrp, rt = hrpf(), m:FindFirstChild("HumanoidRootPart")
+            S.target = (prop and "PROP " or boss and "BOSS " or "") .. m.Name
+            stage((prop and "Breaking blocking prop: " or boss and "Fighting boss " or "Fighting ") .. m.Name)
+            if fight(m, boss) then return end
+        end
+        atkFlag, S.target = false, "-"
+        local here = currentFloor()
+        if here then
+            local ex = rootOf(here, "ExitTeleporter")
+            if ex and ex.Parent and ex:FindFirstChild("TouchInterest") then
+                local hrp = hrpf()
+                local d = hrp and (ex.Position - hrp.Position).Magnitude or 9999
+                stage("Going through the door of floor " .. here .. " -> " .. (here + 1))
+                if d <= CFG.door then touch(ex) end
+                goto_(ex.CFrame)
+                return
+            end
+            if S.floor > here then
+                local en = rootOf(here + 1, "EntranceTeleporter")
+                if en then stage("Following the door to floor " .. (here + 1)); goto_(en.CFrame * CFrame.new(0, 10, 0)); return end
+            end
+        end
+        local fm = floorModel(here) or floorModel(S.floor) or floorModel(highestFloor())
+        local cf = floorCF(fm)
+        if cf then stage("Scanning floor " .. tostring(here or S.floor)); goto_(cf); return end
+        stage("Waiting for the new floor to load")
+        hoverHigh()
+    end
+
+    -- ===== lobby (pads) =====
+    local function pads()
+        local f = D.padsFolder(); local out = {}
+        if f then for _, c in ipairs(f:GetChildren()) do if c:FindFirstChild("DungeonSettingsChanged") and c:FindFirstChild("Pad") then out[#out + 1] = c end end end
+        table.sort(out, function(a, b) return a.Name < b.Name end)
+        return out
+    end
+    local function energy()
+        local ok, r = pcall(function() return require(RS.DungeonClient.ReplicatedPlayerData).get() end)
+        return (ok and type(r) == "table") and math.floor(tonumber(r.CurrentEnergy) or 0) or 0
+    end
+    local chosen, setAt, startAt = nil, 0, 0
+    local function pickPad()
+        local list = pads(); if #list == 0 then return nil end
+        local best, bs
+        for _, p in ipairs(list) do
+            local n, mx, who = p:GetAttribute("NumPlayersOnPad") or 0, p:GetAttribute("MaxPlayers") or 4, p:GetAttribute("Initiator")
+            if n < mx then
+                local sc = n * 4 + ((who == Player.UserId) and 2 or (who == nil and 1 or 0))
+                if not bs or sc > bs then bs, best = sc, p end
+            end
+        end
+        if chosen and chosen.Parent then
+            local n, mx = chosen:GetAttribute("NumPlayersOnPad") or 0, chosen:GetAttribute("MaxPlayers") or 4
+            if n < mx then return chosen end
+        end
+        chosen = best or list[1]
+        return chosen
+    end
+    local function lobbyStep()
+        S.energy = energy()
+        local hrp = hrpf(); if not hrp then return end
+        local follow = Config.DunFollow
+        if not Config.DunStart and follow and follow ~= "" and follow ~= "None" then
+            local pl = PlayersSvc:FindFirstChild(follow)
+            local tr = pl and pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+            if tr then stage("Joining " .. follow); goto_(tr.CFrame * CFrame.new(0, 3, 0)); return end
+            stage("Waiting for " .. follow .. " to appear"); hoverHigh(); return
+        end
+        local padM = pickPad()
+        if not padM then stage("No pad found"); hoverHigh(); return end
+        local pad = padM:FindFirstChild("Pad")
+        if not Player:FindFirstChild("TeleporterPadObjectReference") then
+            stage("Going to pad " .. padM.Name .. " (" .. (padM:GetAttribute("NumPlayersOnPad") or 0) .. "/" .. (padM:GetAttribute("MaxPlayers") or 4) .. ")")
+            goto_(pad.CFrame * CFrame.new(0, 4, 0))
+            return
+        end
+        goto_(pad.CFrame * CFrame.new(0, 4, 0))
+        if Player:GetAttribute("IsTeleporting") or padM:GetAttribute("PreparingToTeleport") then stage("Entering the dungeon..."); return end
+        if not Config.DunStart then stage("On the pad: waiting for the other account to start"); return end
+        local dsc = padM:FindFirstChild("DungeonSettingsChanged")
+        if padM:GetAttribute("Initiator") == Player.UserId and padM:GetAttribute("Difficulty") ~= Config.DunDiff then
+            if os.clock() - setAt > 2 then setAt = os.clock(); dsc:FireServer("Difficulty", Config.DunDiff) end
+            return
+        end
+        local n = padM:GetAttribute("NumPlayersOnPad") or 0
+        local need = math.max(Config.DunMin or 1, padM:GetAttribute("MinPlayers") or 1)
+        if n < need then stage(string.format("Waiting for players %d/%d", n, need)); return end
+        local cost = tonumber(Config.DunCost) or 0
+        if cost > 0 and S.energy < cost then stage("No energy " .. S.energy .. "/" .. cost); return end
+        if os.clock() - startAt > 4 then startAt = os.clock(); stage("Starting the dungeon"); dsc:FireServer("Start") end
+    end
+
+    -- ===== passo principal (chamado pelo loop de prioridades) =====
+    local wasRun = false
+    function D.step()
+        if not (Config.DunFarm or Config.DunJoin) then
+            if D.active then D.halt() end
+            return false
+        end
+        local hrp = hrpf()
+        if hrp and hrp.Position.Y > -100 then D.lastGood = hrp.Position end
+        if inRun() then
+            if not Config.DunFarm then return false end
+            D.active = true
+            if not wasRun then wasRun, D.finished = true, false; S.runs += 1; S.dead = 0; cardAt = 0 end
+            pcall(runStep)
+            return true
+        end
+        if wasRun then
+            wasRun, D.finished, S.buffs = false, false, {}
+            atkFlag = false
+        end
+        if inHub() and Config.DunJoin then
+            D.active = true
+            pcall(lobbyStep)
+            return true
+        end
+        if D.active then D.halt() end
+        Diag.dungeon = "Not in the Dungeon Hub or a dungeon (go to the Dungeon Hub to start)"
+        return false
+    end
+    table.insert(Connections, Player.CharacterAdded:Connect(function() atkFlag = false; cancelTween(); lastPos = nil end))
+
+    -- ===== UI =====
+    local function tg(id, title, desc)
+        T:AddToggle(id, { Title = title, Description = desc, Default = Config[id] and true or false }):OnChanged(function(v) Config[id] = v; persist() end)
+    end
+    T:AddSection("Join Dungeon")
+    local DIFFS = { "Normal", "Hard", "Challenge" }
+    local di = 1
+    for i, n in ipairs(DIFFS) do if n == Config.DunDiff then di = i end end
+    T:AddDropdown("DunDiff", { Title = "Select Difficulty", Description = "Difficulty set on the pad (Hard/Challenge must be unlocked)", Values = DIFFS, Default = di })
+        :OnChanged(function(v) Config.DunDiff = v; persist() end)
+    T:AddSlider("DunMin", { Title = "Min Player Join Dungeon", Description = "The starter waits until the pad has this many players", Min = 1, Max = 4, Default = tonumber(Config.DunMin) or 1, Rounding = 0 })
+        :OnChanged(function(v) Config.DunMin = math.floor(v); persist() end)
+    tg("DunStart", "Account Start Dungeon", "This account sets the difficulty and presses Start. Leave off on the accounts that only join")
+    local function names()
+        local o = { "None" }
+        for _, p in ipairs(PlayersSvc:GetPlayers()) do if p ~= Player then o[#o + 1] = p.Name end end
+        return o
+    end
+    local fd = T:AddDropdown("DunFollow", { Title = "Select Account Join", Description = "Account that does not start: walks to this player's pad", Values = names(), Default = 1 })
+    fd:OnChanged(function(v) Config.DunFollow = v; persist() end)
+    T:AddButton({ Title = "Refresh Player", Description = "Reloads the player list", Callback = function() pcall(function() fd:SetValues(names()) end) end })
+    tg("DunJoin", "Auto Join Dungeon", "In the Dungeon Hub: goes to a pad, sets the difficulty and starts (needs the energy cost)")
+    T:AddSection("Dungeon")
+    local WV = { "Melee", "Sword", "Blox Fruit", "Gun" }
+    local wi = 1
+    for i, n in ipairs(WV) do if n == Config.DunWeapon then wi = i end end
+    T:AddDropdown("DunWeapon", { Title = "Select Weapon Dungeon", Description = "Weapon type used inside the dungeon (falls back to any weapon you have)", Values = WV, Default = wi })
+        :OnChanged(function(v) Config.DunWeapon = v; persist() end)
+    tg("DunFarm", "Auto Attack Dungeon", "Inside a dungeon: hovers high, kills every enemy, breaks blocking props, fights bosses and goes through the doors floor by floor")
+    tg("DunCard", "Auto Pick Card Dungeon", "Picks the card (buff) automatically: attack speed, lifesteal, cooldowns and your weapon's buffs first")
+    T:AddSection("Dungeon Status")
+    local info = T:AddParagraph({ Title = "Dungeon", Content = "Checking..." })
+    task.spawn(function()
+        while Alive do
+            pcall(function()
+                local nb = 0
+                for _ in pairs(S.buffs) do nb += 1 end
+                info:SetDesc(table.concat({
+                    "Where: " .. (inRun() and "inside a dungeon" or (inHub() and "Dungeon Hub" or "other area")),
+                    "Stage: " .. S.stage,
+                    string.format("Floor %d/%d | enemies %d/%d | time left %ds", S.floor, S.maxFloor, S.dead, S.total, math.floor(S.left)),
+                    "Target: " .. S.target .. " | kills: " .. S.kills .. " | runs: " .. S.runs,
+                    "Energy: " .. energy() .. " (cost " .. (Config.DunCost or 10) .. ") | cards picked: " .. nb,
+                    "Diag: " .. tostring(Diag.dungeon or "idle"),
+                }, "\n"))
+            end)
+            task.wait(1)
+        end
+    end)
+end)()
+
 -- ---------- ESP ----------
 do
     local T = Tabs.ESP
@@ -7410,6 +8061,22 @@ do
         ["Water"]      = { base = "Darker", mul = 1.8, tint = Color3.fromRGB(190, 228, 252), tintA = 0.5, glass = 0.985, corner = 18,
                            stroke = Color3.fromRGB(235, 248, 255), thick = 2, strokeT = 0.1, acrylic = true },
     }
+    -- Variações do Water (vidro transparente colorido)
+    local function glass(tint, stroke, tintA) return { base = "Darker", mul = 1.8, tint = tint, tintA = tintA or 0.5, glass = 0.985, corner = 18,
+        stroke = stroke, thick = 2, strokeT = 0.1, acrylic = true } end
+    THEMES["Ocean"]        = glass(Color3.fromRGB(40, 120, 205), Color3.fromRGB(120, 190, 255), 0.55)
+    THEMES["Ice"]          = glass(Color3.fromRGB(225, 246, 255), Color3.fromRGB(255, 255, 255), 0.6)
+    THEMES["Aqua Mint"]    = glass(Color3.fromRGB(110, 230, 200), Color3.fromRGB(200, 255, 240), 0.5)
+    THEMES["Sakura Glass"] = glass(Color3.fromRGB(255, 170, 210), Color3.fromRGB(255, 225, 240), 0.5)
+    THEMES["Violet Glass"] = glass(Color3.fromRGB(165, 125, 255), Color3.fromRGB(220, 200, 255), 0.5)
+    -- Variações do Full Black (sólido, escuro, borda colorida)
+    local function dark(tint, tintA, stroke, title, sub, mul) return { base = "Darker", mul = mul or 0.35, strokeMul = 1.1, solid = true, corner = 18,
+        tint = tint, tintA = tintA, stroke = stroke, thick = 4, strokeT = 0, acrylic = false, title = title, titleStroke = BLACK, sub = sub } end
+    THEMES["Midnight"]        = dark(Color3.fromRGB(8, 14, 48), 0.55, Color3.fromRGB(70, 100, 255), WHITE, Color3.fromRGB(120, 160, 255))
+    THEMES["Carbon"]          = dark(Color3.fromRGB(30, 30, 32), 0.6, Color3.fromRGB(130, 130, 135), WHITE, Color3.fromRGB(200, 200, 205), 0.5)
+    THEMES["Blood Black"]     = dark(Color3.fromRGB(40, 0, 6), 0.45, Color3.fromRGB(225, 20, 45), Color3.fromRGB(255, 70, 80), Color3.fromRGB(255, 120, 130))
+    THEMES["Neon Cyan Black"] = dark(Color3.fromRGB(0, 24, 30), 0.45, Color3.fromRGB(0, 230, 255), Color3.fromRGB(0, 240, 255), Color3.fromRGB(150, 255, 255))
+    THEMES["Royal Black"]     = dark(Color3.fromRGB(26, 6, 48), 0.5, Color3.fromRGB(155, 75, 255), Color3.fromRGB(190, 130, 255), Color3.fromRGB(225, 190, 255))
     local cur = THEMES["Default"]
     local Locks = setmetatable({}, { __mode = "k" }) -- [instância] = { propriedade = valor fixo }
 
