@@ -471,7 +471,7 @@ local Aim = { part = nil, on = false, camChanged = false, px = nil, py = nil, le
 -- Para Melee, prioriza o controlador de combate do jogo: Tool:Activate() sozinho
 -- normalmente não dispara o M1 do estilo de luta.
 local METHODS = { "CombatFramework", "Net", "Tool", "VirtualUser" }
-local Watch = { enemy = nil, hp = 0, lastDmg = 0, mi = 1, stage = 0, confirmed = false, skip = {} }
+local Watch = { enemy = nil, hp = 0, lastDmg = 0, mi = 2, good = 2, stage = 0, confirmed = false, skip = {} }
 local Fail = {}
 
 local function currentMethod()
@@ -766,9 +766,23 @@ end
 -- Thread de ataque: só clica quando alguma rotina marcou "AttackUntil".
 -- Cada passo roda dentro de pcall: um erro isolado NÃO mata mais a thread (era o que fazia o ataque parar).
 local lastPoint, lastEquip = 0, 0
+local nearAt, nearV = 0, false
+local function enemyNear()
+    if os.clock() - nearAt < 0.12 then return nearV end
+    nearAt, nearV = os.clock(), false
+    local _, hrp = getChar()
+    local f = workspace:FindFirstChild("Enemies")
+    if hrp and f then
+        for _, e in ipairs(f:GetChildren()) do
+            local r, h = e:FindFirstChild("HumanoidRootPart"), e:FindFirstChildOfClass("Humanoid")
+            if r and h and h.Health > 0 and (r.Position - hrp.Position).Magnitude <= 58 then nearV = true break end
+        end
+    end
+    return nearV
+end
 local function attackTick()
     -- State.Busy pisca em false enquanto o loop principal espera um remote; o Modo só vira "Parado" no fim do ciclo
-    if not ((State.Busy or State.Mode ~= "Idle") and os.clock() < Config.AttackUntil) then
+    if not ((State.Busy or State.Mode ~= "Idle") and (os.clock() < Config.AttackUntil or enemyNear())) then
         Aim.on = false
         return 0.03
     end
@@ -3065,7 +3079,7 @@ function AFL.tvRun()
                     hrp.CFrame = cf
                     hrp.AssemblyLinearVelocity = Vector3.zero
                 end
-                if findToolByName("skull guitar") then
+                if Config.ShootGunTyrant ~= false and findToolByName("skull guitar") then
                     Diag.summon = string.format("Auto Tyrant step 2: pot %d/%d with the Skull Guitar", i, #V.vases)
                     AFL.tvShoot(pos)
                 else
@@ -3171,18 +3185,26 @@ function AFL.tyrantStep()
 end
 
 -- Bosses: só mata se a opção respectiva estiver ligada; o boss tem prioridade sobre os NPCs
+function AFL.princeGate(boss)
+    if not boss or boss.Name ~= "Cake Prince" then return false end
+    if Player:GetAttribute("CurrentLocation") == "Dimensional Shift" then return false end
+    State.Text = "Katakuri: entering the Dimensional Shift portal"
+    flyTo(CFrame.new(-2168, 84, -12397))
+    return true
+end
 local function bossKillStep()
     local list = {
         { Config.KillReaper,      "Soul Reaper", "Auto Kill Soul Reaper" },
         { Config.KillTyrant and Config.TyrantKill, "Tyrant of the Skies", "Auto Tyrant of the Skies" },
         { Config.KillDoughKing,   "Dough King",  "Auto Kill Dough King" },
-        { Config.KillDoughPrince, "Cake Prince", "Auto Kill Dough Prince" },
+        { Config.KillDoughPrince and not Config.IgnoreCakePrince, "Cake Prince", "Auto Kill Dough Prince" },
     }
     for _, b in ipairs(list) do
         if b[1] then
             local boss = bossAlive(b[2])
             if boss then
                 State.Mode, State.Text = b[3], "Killing " .. boss.Name
+                if AFL.princeGate(boss) then return true end
                 fightEnemy(boss, { boss.Name }, false)
                 return true
             end
@@ -3198,13 +3220,17 @@ local function summonStep()
     if getSea() ~= 3 then return false end
     local now = os.clock()
     -- Dough Prince: com o Sweet Chalice na hotbar o jogo invoca o Dough King, então só sem ele
-    if Config.SummonDoughPrince and now - Summon.prince > 6 and not bossAlive("Cake Prince") then
+    if Config.SummonDoughPrince and now - Summon.prince > 4 and not bossAlive("Cake Prince") then
         Summon.prince = now
         if hasItem("Sweet Chalice") then
             Diag.summon = "Dough Prince: you have the Sweet Chalice (the game would summon the Dough King)"
         else
             task.spawn(function()
                 local ok, r = invoke("CakePrinceSpawner")
+                if ok and type(r) == "string" and string.find(r, "open the portal now", 1, true) then
+                    task.wait(0.3)
+                    ok, r = invoke("CakePrinceSpawner")
+                end
                 Diag.summon = "Dough Prince: " .. (ok and "" or "error ") .. tostring(r)
             end)
         end
@@ -3221,8 +3247,15 @@ local function summonStep()
             Diag.summon = "Dough King: no Sweet Chalice (use Auto Dough King to get one)"
         end
     end
-    -- Random Bones (gasta Bones a cada giro)
-    if Config.RandomBones and now - Summon.bones > 3 then
+    if Config.AutoPray and now - (Summon.pray or 0) > 1 then
+        Summon.pray = now
+        task.spawn(function() invoke("gravestoneEvent", 1) end)
+    end
+    if Config.AutoTryLuck and now - (Summon.luck or 0) > 1 then
+        Summon.luck = now
+        task.spawn(function() invoke("gravestoneEvent", 2) end)
+    end
+    if Config.RandomBones and now - Summon.bones > 2 and invCount("Bones") >= 50 then
         Summon.bones = now
         task.spawn(function()
             local ok, r
@@ -3284,6 +3317,11 @@ end
 local lastTrade = 0
 local function kingStep()
     State.Mode = "Auto Dough King"
+    if Config.IgnoreDoughChaliceFarm and not hasItem("Sweet Chalice") then
+        State.Text = "Dough King: farm/boss only (Ignore item)"
+        farmQuestStep(DoughQuest, "Dough King", Config.AutoQuestKing, CakeMobs, true)
+        return
+    end
     if hasItem("Sweet Chalice") then
         Diag.summon = Diag.summon:find("Dough King") and Diag.summon or "Sweet Chalice ready: farming Cake Land (500 kills)"
         farmQuestStep(DoughQuest, "Dough King", Config.AutoQuestKing, CakeMobs, true)
@@ -4885,9 +4923,10 @@ AFL.feat = {
     DoughKill = { labels = function() return Config.KillDoughPrince and { "Auto Kill Dough Prince" } or {} end,
         on = function() return Config.KillDoughPrince and true or false end,
         run = function()
-            local boss = bossAlive("Cake Prince")
+            local boss = (not Config.IgnoreCakePrince) and bossAlive("Cake Prince")
             if boss then
                 State.Mode, State.Text = "Auto Kill Dough Prince", "Killing " .. boss.Name
+                if AFL.princeGate(boss) then return true end
                 fightEnemy(boss, { boss.Name }, false)
                 return true
             end
@@ -5081,7 +5120,7 @@ do
 local HttpService = game:GetService("HttpService")
 local SAVE_FILE = "MoonHub_KeyPro.json"
 local SAVED_KEYS = { "AutoAwaken", "RaceReroll", "RaceTarget", "RaceGhoul", "RaceGhoulHop", "RaceCyborg", "RaceV2", "RaceV3", "RaceV3Pvp", "RaceLever", "RaceGear", "RaceV4Auto", "MastOn", "MastKeys", "MastGunKeys", "MastMode", "MastMethod", "MastHP", "MastFast", "MastGunAim", "MastHold", "MastAllSword", "MastAllMelee", "MastAllGun", "PrioDefault", "UIScale", "MobileMode", "UIAspect", "UIAnimStyle", "UIAnim", "UIAnimSpeed", "UIW", "UIH", "UILock", "KitTP", "KitSpawn", "KitSummon", "KitCollect", "KitTrade", "KitAzure", "LevSpy", "LevFind", "LevSpeed", "LevBack", "LevStart", "LevTP", "LevBoatTo", "LevAttack", "LevFruit", "LevDragon", "LevFast", "LevHold", "LevWeapons", "LevKeys", "LevGuitar", "LevSkills", "LevHeart", "VulcRockW", "VulcRockK", "VulcTreeW", "VulcTreeK", "VulcPull", "VulcPullMax", "AimOn", "AimHitChance", "AimAutoPing", "AimFF", "AimFriends", "AimGate", "AimInfo", "AimMode", "AimTargets", "AimPriority", "AimPart", "AimFOV", "AimShowFOV", "AimFOVColor", "AimFOVOrigin", "AimSmooth", "AimPredict", "AimPredictOn", "AimMaxDist", "AimVisible", "AimTeam", "AimSticky", "AimTrigger", "AimKey", "AimHighlight", "AimLine", "AimMinHP", "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
-    "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones",
+    "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones", "IgnoreCakePrince", "AutoQuestKing", "KillDoughKing", "SummonDoughKing", "IgnoreDoughChaliceFarm", "RandomBones", "AutoPray", "AutoTryLuck", "ShootGunTyrant",
     "Weapon", "AttackMode", "Bring", "TweenSpeed", "AutoBuso", "AutoKen", "AutoV3", "AutoV4",
     "RemoveFog", "FpsBooster", "ToggleKey",
     "PirateRaid", "Factory", "Elite", "EliteHop", "ChestFarm", "ChestHop", "ChestCount",
@@ -7180,15 +7219,28 @@ addOpt("AutoTyrant", "Auto Tyrant of the Skies",
 addOpt("QuestTyrant", "Auto Quest Tyrant of the Skies", "Farms the Tiki Outpost NPCs to light the statue eyes", "TyrantQuest")
 addOpt("SpawnTyrant", "Auto Spawn Tyrant of the Skies", "With the 4 eyes lit, breaks the 4 pots so the boss spawns", "TyrantSpawn")
 addOpt("KillTyrantBoss", "Auto Kill Tyrant of the Skies", "Kills the boss when it appears", "TyrantKill")
+if Config.ShootGunTyrant == nil then Config.ShootGunTyrant = true end
+addOpt("ShootGunTyrant", "Use Skull Guitar for Vases", "Quebra os vasos do Tyrant com a Skull Guitar (desligado: M1 + skills das armas)", "ShootGunTyrant")
 
-subTitle("Dough Prince")
-addModeToggle("AutoDough", "Auto Dough Prince", "Dough", true, "Farms the Cake Land NPCs")
-addOpt("QuestDough", "Auto Quest Dough Prince", "Takes the Head Baker quest (only takes another when the current one is done)", "AutoQuestDough")
-addOpt("SpawnDough", "Auto Spawn Dough Prince", "Only summons with this on (needs the ~500 kills and no Sweet Chalice)", "SummonDoughPrince")
-addOpt("KillDough", "Auto Kill Dough Prince", "Only kills the boss with this on; the boss comes before the NPCs", "KillDoughPrince")
+subTitle("Katakuri")
+addModeToggle("AutoDough", "Auto Katakuri", "Dough", true, "Farma os NPCs da Cake Land (~500 kills), invoca o Cake Prince, entra na Dimensional Shift e mata")
+addOpt("IgnoreKatakuri", "Ignore Katakuri", "Nao mata o Cake Prince quando ele aparecer (continua farmando)", "IgnoreCakePrince")
+addOpt("QuestDough", "Auto Quest Katakuri", "Takes the Head Baker quest (only takes another when the current one is done)", "AutoQuestDough")
+addOpt("SpawnDough", "Auto Spawn Katakuri", "Only summons with this on (needs the ~500 kills and no Sweet Chalice)", "SummonDoughPrince")
+addOpt("KillDough", "Auto Kill Katakuri", "Only kills the boss with this on; the boss comes before the NPCs", "KillDoughPrince")
+
+subTitle("Dough King")
+addModeToggle("AutoKing", "Auto Dough King", "King", true, "Elite Hunter ate o God's Chalice, farma 10 Conjured Cocoa e troca pelo Sweet Chalice")
+addOpt("IgnoreChalice", "Ignore Farm Dough King Item", "Foca so no boss: nao tenta conseguir o Sweet Chalice", "IgnoreDoughChaliceFarm")
+addOpt("QuestKing", "Auto Quest Dough King", "Pega as quests (Elite Hunter / Cacau / Cake Land) sem pegar outra antes de terminar", "AutoQuestKing")
+addOpt("KillKing", "Auto Kill Dough King", "Kills the boss when it appears", "KillDoughKing")
+addOpt("SummonKing", "Auto Summon Dough King", "Invoca com o Sweet Chalice", "SummonDoughKing")
 
 subTitle("Auto Bones")
 addModeToggle("AutoBones", "Auto Farm Bones", "Bones", true, "Farms the Haunted Castle NPCs")
+addOpt("RandomSurprise", "Auto Random Surprise", "Gira o Random Bones quando tem 50+ Bones", "RandomBones")
+addOpt("AutoPray", "Auto Pray", "Reza na lapide do Haunted Castle", "AutoPray")
+addOpt("AutoTryLuck", "Auto Try Luck", "Tenta a sorte na lapide do Haunted Castle", "AutoTryLuck")
 addOpt("QuestBones", "Auto Quest Bones", "Takes the Haunted Castle quest for your level (only takes another when the current one is done)", "AutoQuestBones")
 end
 
@@ -12387,7 +12439,7 @@ end)
 AFL.modDone('diag', __ok, __e) end
 task.defer(function()
     local M = AFL.Mods
-    local msg = string.format("Build %s | %d modules loaded", "20261016-1657", #M.ok)
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1738", #M.ok)
     if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
     pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
 end)
