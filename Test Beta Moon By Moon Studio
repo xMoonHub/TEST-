@@ -7166,10 +7166,17 @@ do
     tg("VulcBone", "Auto Collect Bone", "Collects the bones that fall around the volcano")
 end
 
+AFL.Mods = { ok = {}, fail = {} }
+function AFL.modDone(n, ok, e)
+    if ok then AFL.Mods.ok[#AFL.Mods.ok + 1] = n return end
+    AFL.Mods.fail[#AFL.Mods.fail + 1] = n .. ": " .. tostring(e)
+    pcall(function() AFL.logErr("module " .. n, e) end)
+end
+do local __ok, __e = pcall(function()
 -- ---------- Races ----------
 -- Bases: Banana + Quantum Onyx (Ghoul/Cyborg/V2/V3/V4) + NightRace (Ectoplasm, Fist of Darkness, Ghost Ship) + 6V3PullLever
 -- + Conte_do_colado (Cursed Captain join API). Um recurso por vez, em ordem: Reroll > Ghoul > Cyborg > V2 > V3 > V4 Lever.
-;(function()
+(function()
     local T = Tabs.Races
     local RS = game:GetService("ReplicatedStorage")
     local HttpSvc = game:GetService("HttpService")
@@ -7628,9 +7635,13 @@ end
         end })
     end
 end)()
+
+end)
+AFL.modDone('races', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Webhook (Rare Boss) ----------
 -- Base: MoonHub_Webhook. Avisa no Discord quando um boss raro existe no servidor (1x por servidor/boss). Envia só nome do boss, contagem de players, PlaceId e JobId.
-;(function()
+(function()
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -7942,9 +7953,13 @@ TS:AddToggle("WebhookOn", { Title = "Rare Boss Webhook", Description = "Posts to
     :OnChanged(function(v) Config.WebhookOn = v; W.enabled = v; persist() end)
 TS:AddButton({ Title = "Send Webhook Test", Description = "Sends a sample message to the Discord channel", Callback = function() W.test() end })
 end)()
+
+end)
+AFL.modDone('webhook', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Dungeons ----------
 -- Base: NightDungeon (andar/lutar/escolher cartas dentro da dungeon) + Banana Hub (entrar no pad, dificuldade, min. de jogadores, conta que inicia).
-;(function()
+(function()
     local T = Tabs.Dungeons
     local RS = game:GetService("ReplicatedStorage")
     local TweenSvc = game:GetService("TweenService")
@@ -8536,9 +8551,13 @@ end)()
     end)
 end)()
 
+
+end)
+AFL.modDone('dungeon', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Farm Mastery ----------
 -- Banana (Farm Mastery: bate normal até o mob chegar em X% de vida e termina com fruta/gun) + Quantum (Enable Mastery / Health Mob% / Auto Mastery Swords).
-;(function()
+(function()
     local T = Tabs.Mastery
     local M = {}
     AFL.Mast = M
@@ -8740,9 +8759,13 @@ end)()
     end)
 end)()
 
+
+end)
+AFL.modDone('mast', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Aimbot nativo ----------
 -- Modos: Silent (Mouse.Hit/Target), Camera Lock (suave) ou Both. Alvos: Players / NPCs / Both. FOV circular, prioridade, previsão, wall check, team check, tecla de ativação.
-;(function()
+(function()
     local A = Tabs.Aimbot
     local AB = {}
     AFL.Aim = AB
@@ -9079,8 +9102,12 @@ end)()
     end)
 end)()
 
+
+end)
+AFL.modDone('aim', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Aba Status: ilhas, jogador, servidor, mundo e o estado de todas as funções ----------
-;(function()
+(function()
     local T = Tabs.Status
     local CollectionService = game:GetService("CollectionService")
     local StatsSvc = game:GetService("Stats")
@@ -9330,8 +9357,12 @@ end)()
     end)
 end)()
 
+
+end)
+AFL.modDone('status', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Sea Events extras: Kitsune Island + Leviathan (base: Banana Hub) ----------
-;(function()
+(function()
     local T = Tabs.Sea
     local SE = {}
     AFL.SeaEv = SE
@@ -9764,8 +9795,12 @@ end)()
     end)
 end)()
 
+
+end)
+AFL.modDone('seaev', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Interface: redimensionar como uma aba do Chrome + zoom + animações ----------
-;(function()
+(function()
     local T = Tabs.Script
     local root = Window and Window.Root
     if not root then return end
@@ -10001,8 +10036,12 @@ end)()
         :OnChanged(function(v) Config.UIAnimSpeed = v; persist() end)
 end)()
 
+
+end)
+AFL.modDone('uisize', __ok, __e) end
+do local __ok, __e = pcall(function()
 -- ---------- Diagnóstico (aba Script Settings) ----------
-;(function()
+(function()
     local T = Tabs.Script
     T:AddSection("Diagnostics")
     local errP = T:AddParagraph({ Title = "Errors", Content = "No errors." })
@@ -10042,6 +10081,15 @@ end)()
     end)
 end)()
 
+
+end)
+AFL.modDone('diag', __ok, __e) end
+task.defer(function()
+    local M = AFL.Mods
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1243", #M.ok)
+    if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
+    pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
+end)
 -- ---------- ESP ----------
 do
     local T = Tabs.ESP
