@@ -6655,7 +6655,7 @@ do
     pt:OnChanged(function(v)
         if busy then return end
         Config.PrioDefault = v and true or false
-        if v then fillDefault() end
+        if v and fillDefault then fillDefault() end
         persist()
     end)
     Tabs.Farm:AddButton({ Title = "Reset to default priorities", Description = "Goes back to the script's recommended order",
@@ -9856,7 +9856,7 @@ end)
 AFL.modDone('diag', __ok, __e) end
 task.defer(function()
     local M = AFL.Mods
-    local msg = string.format("Build %s | %d modules loaded", "20261016-1259", #M.ok)
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1308", #M.ok)
     if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
     pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
 end)
