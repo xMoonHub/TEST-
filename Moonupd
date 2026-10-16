@@ -3676,7 +3676,8 @@ local function findGroundFruit()
     local _, hrp = getChar()
     if not hrp then return end
     local best, bestDist = nil, math.huge
-    for _, v in ipairs(workspace:GetChildren()) do
+    local SKIP = { Map = true, Enemies = true, NPCs = true, _WorldOrigin = true, Characters = true, Boats = true, SeaBeasts = true, Camera = true }
+    local function consider(v)
         if v:IsA("Tool") and string.find(v.Name, "Fruit") and (FruitBlacklist[v] or 0) < os.clock() then
             local handle = v:FindFirstChild("Handle")
             if handle then
@@ -3685,14 +3686,24 @@ local function findGroundFruit()
             end
         end
     end
+    for _, v in ipairs(workspace:GetChildren()) do
+        consider(v)
+        if (v:IsA("Folder") or v:IsA("Model")) and not SKIP[v.Name] and not Players:GetPlayerFromCharacter(v) then
+            for _, w in ipairs(v:GetChildren()) do consider(w) end
+        end
+    end
     return best
 end
 
 local function collectStep(fruit)
     local handle = fruit:FindFirstChild("Handle")
     if not handle then return end
-    if CollectTarget ~= fruit then CollectTarget, CollectStart = fruit, os.clock() end
-    if os.clock() - CollectStart > 25 then -- travou: ignora essa fruta por 60s
+    local _, hrp0 = getChar()
+    local dist0 = hrp0 and (hrp0.Position - handle.Position).Magnitude or math.huge
+    if CollectTarget ~= fruit then CollectTarget, CollectStart, State.collectBest = fruit, os.clock(), math.huge end
+    -- sem limite de distancia: so conta como travado se ficar 45s sem chegar mais perto
+    if dist0 < (State.collectBest or math.huge) - 5 then State.collectBest, CollectStart = dist0, os.clock() end
+    if os.clock() - CollectStart > 45 then
         FruitBlacklist[fruit] = os.clock() + 60
         CollectTarget = nil
         return
@@ -5075,7 +5086,7 @@ local SAVED_KEYS = { "AutoAwaken", "RaceReroll", "RaceTarget", "RaceGhoul", "Rac
     "RemoveFog", "FpsBooster", "ToggleKey",
     "PirateRaid", "Factory", "Elite", "EliteHop", "ChestFarm", "ChestHop", "ChestCount",
     "AutoGacha", "AutoStore", "RemoveGachaEffect", "CollectFruits", "CollectHop", "AutoBuy", "BuyPrio",
-    "EspPlayer", "EspFruit", "EspBerry", "EspIsland", "WalkWater", "RaidType", "AutoStartRaid", "AutoRaid", "AutoPay", "PayMode", "PayOnly1M", "Theme", "AntiAfk", "AutoRejoin", "EventNotify", "MirageOn", "PullLever", "VulcFull", "VulcMagnet", "VulcFind", "VulcStart", "VulcEgg", "VulcBone", "BossSel", "BossKill", "BossQuest", "BossHop", "AwkOn", "AwkKill", "Team", "AutoTeam", "Prio", "SubTravel", "SubGod", "SubC2", "SubV2", "SubTTK", "SubDT", "SubBL", "SubEl", "SubFK", "SubDC", "SubDS", "SubSK", "SubEC", "SubSan", "SubYama", "SubTushita", "SubCDK", "SubLegSword", "SubLegHop", "SecretOn", "SecretSel", "SecretAssist", "SecretAuto", "AwkTrigger", "SeaOn", "SeaZone", "SeaBoat", "SeaEvents", "SeaPrio", "SeaWeapons", "SeaSkills", "SeaOpt", "SeaFly", "SeaFlySpeed", "SeaSpeed" }
+    "EspPlayer", "EspFruit", "EspBerry", "EspIsland", "WalkWater", "RaidType", "AutoStartRaid", "AutoRaid", "AutoPay", "PayMode", "PayOnly1M", "Theme", "AntiAfk", "AutoRejoin", "EventNotify", "MirageOn", "PullLever", "VulcFull", "VulcMagnet", "VulcFind", "VulcStart", "VulcEgg", "VulcBone", "BossSel", "BossKill", "BossQuest", "BossHop", "AwkOn", "AwkKill", "Team", "AutoTeam", "Prio", "SubTravel", "SubGod", "SubC2", "SubC2Kills", "SubV2", "SubTTK", "SubDT", "SubBL", "SubEl", "SubFK", "SubDC", "SubDS", "SubSK", "SubEC", "SubSan", "SubYama", "SubTushita", "SubCDK", "SubLegSword", "SubLegHop", "SecretOn", "SecretSel", "SecretAssist", "SecretAuto", "AwkTrigger", "SeaOn", "SeaZone", "SeaBoat", "SeaEvents", "SeaPrio", "SeaWeapons", "SeaSkills", "SeaOpt", "SeaFly", "SeaFlySpeed", "SeaSpeed" }
 Config.AutoSave, Config.ToggleKey = false, "RightControl"
 Config.TyrantQuest, Config.TyrantSpawn, Config.TyrantKill, Config.FpsBooster = true, true, true, false
 Config.EliteHop, Config.ChestFarm, Config.ChestHop, Config.ChestCount, Config.CollectHop = false, false, false, 10, false
@@ -7129,12 +7140,12 @@ addModeToggle("AutoLevel", "Auto Farm Level", "Level", false)
 
 subTitle("Secret Quest")
 Tabs.Normal:AddToggle("SecretOn", { Title = "Auto Secret Quest",
-    Description = "Sea 1 Island Secrets. Kills the Awakened bosses when they appear. With Secret Assist (Secrets tab) it also flies to the NPC of the next pending secret and presses the known prompts; the puzzles themselves are still manual. Full guide in the Secrets tab.",
+    Description = "Sea 1 Island Secrets, fully automatic for what you select below (empty = all): flies to each pending secret, kills its enemies, presses its prompts, triggers the Awakened boss of the islands you picked and kills it. A few puzzles are still yours (pipes, crystals, statues, lookout...). Full guide in the Secrets tab.",
     Default = Config.SecretOn and true or false })
     :OnChanged(function(v) Config.SecretOn = v; persist() end)
 do
     local sd = Tabs.Normal:AddDropdown("SecretSel", { Title = "Auto Select Secret Quest", Values = AFL.SecretList, Multi = true, Default = {},
-        Description = "Which secrets to do. Empty = all. [manual] = only Secret Assist (fly to the NPC + known prompts), no boss to kill." })
+        Description = "Which secrets to automate. Empty = all. Picking an Awakened boss also does the 2 secrets of its island first. [manual] = no boss to kill, the script only runs the steps it knows." })
     sd:OnChanged(function(val)
         local set = {}
         if type(val) == "table" then
@@ -7144,7 +7155,7 @@ do
         end
         for label in pairs(set) do
             if AFL.SecretManual[label] and not (Config.SecretSel or {})[label] then
-                Fluent:Notify({ Title = "Secret Quest", Content = label .. ": no boss to kill here - turn on Secret Assist (Secrets tab) to be flown to its NPC.", Duration = 6 })
+                Fluent:Notify({ Title = "Secret Quest", Content = label .. ": no boss to kill here - Auto Secret Quest will fly to its NPC and run the steps it knows.", Duration = 6 })
             end
         end
         Config.SecretSel = set
@@ -9816,6 +9827,9 @@ do local __ok, __e = pcall(function()
     local S = { done = nil, at = -100, busy = false, skip = {}, cur = nil, curSince = 0 }
     AFL.Sec = S
     local V = Vector3.new
+    -- "Auto Secret Quest" (Normal Farm) agora liga TUDO sozinho: ajudante + passos automaticos + gatilho dos Awakened selecionados
+    local function assistOn() return Config.SecretOn or Config.SecretAssist or Config.SecretAuto end
+    local function autoOn() return Config.SecretOn or Config.SecretAuto end
 
     -- { ilha, nome na lista (igual ao SecretDefs), id interno do progresso, NPC, posicao do NPC, o que fazer, textos de prompt que o ajudante aperta }
     S.defs = {
@@ -9939,8 +9953,27 @@ do local __ok, __e = pcall(function()
     local function selected(d)
         local sel, any = Config.SecretSel or {}, false
         for _ in pairs(sel) do any = true break end
-        if not any then return true end
-        return sel[d[1] .. " - " .. d[2]] or sel[d[1] .. " - " .. d[2] .. " [manual]"] or false
+        if not any or Config.SubC2 then return true end
+        if sel[d[1] .. " - " .. d[2]] or sel[d[1] .. " - " .. d[2] .. " [manual]"] then return true end
+        -- escolheu o Awakened de uma ilha: os 2 secrets dela sao pre-requisito, entram na lista sozinhos
+        for _, x in ipairs(S.defs) do
+            if x[1] == d[1] and string.find(x[2], "Awakened", 1, true) and sel[x[1] .. " - " .. x[2]] then return true end
+        end
+        return false
+    end
+    -- o Awakened (por chave) esta na selecao? (vazia = todos)
+    function S.bossSelected(bossName)
+        local sel, any = Config.SecretSel or {}, false
+        for _ in pairs(sel) do any = true break end
+        local nm = string.lower(tostring(bossName))
+        if Config.SubC2 then return true end
+        for _, label in ipairs(AFL.SecretList) do
+            local key = AFL.SecretKey[label]
+            if key and string.find(nm, key, 1, true) then
+                return (not any) or sel[label] == true
+            end
+        end
+        return not any
     end
     local function scanPrompts(center, want)
         local out = {}
@@ -9961,12 +9994,12 @@ do local __ok, __e = pcall(function()
         return out
     end
     function S.assist()
-        if not (Config.SecretAssist or Config.SecretAuto) then return false end
+        if not assistOn() then return false end
         S.refresh(false)
         if not S.done then Diag.secret = "assist: waiting for the secret progress"; return false end
         local now = os.clock()
         local d = S.cur
-        if d and (S.isDone(d) or now - S.curSince > (Config.SecretAuto and 300 or 90)) then
+        if d and (S.isDone(d) or now - S.curSince > (autoOn() and 300 or 90)) then
             S.skip[d[3]] = now + 180
             d, S.cur = nil, nil
         end
@@ -9989,7 +10022,7 @@ do local __ok, __e = pcall(function()
             return true
         end
         Diag.secret = "assist: at " .. d[4] .. " - " .. d[2] .. " (do the steps; known prompts are pressed)"
-        if Config.SecretAuto and S.autoStep then
+        if autoOn() and S.autoStep then
             local okA, handled = pcall(S.autoStep, d)
             if okA and handled then return true end
             if not okA then Diag.secret = "auto error: " .. tostring(handled) end
@@ -10011,6 +10044,10 @@ do local __ok, __e = pcall(function()
     AFL.secretStep = function()
         local ok, r = pcall(origStep)
         if ok and r then return true end
+        if Config.SecretOn then
+            local okT, rT = pcall(S.trigger, true)
+            if okT and rT then return true end
+        end
         local ok2, r2 = pcall(S.assist)
         return ok2 and r2 or false
     end
@@ -10409,20 +10446,21 @@ NPC to ask which Awakened boss is next: Secrets Master (-839, 28, 1603)
     S.routines = {
         { key = "chef", run = chefRun }, { key = "fishman", run = fishRun }, { key = "warden", run = wardenRun },
         { key = "yeti", run = yetiRun }, { key = "magma", run = magmaRun }, { key = "gorilla", run = gorillaRun },
-        { key = "cyborg", run = cyborgRun }, { key = "sky warlord", run = warlordRun }, { key = "thunder", run = thunderRun }, { key = "vice", run = viceRun },
+        { key = "cyborg", run = cyborgRun }, { key = "sky warlord", run = warlordRun }, { key = "thunder", alt = "lightning", run = thunderRun }, { key = "vice", alt = "admiral", run = viceRun },
     }
-    function S.trigger()
+    function S.trigger(onlySel)
         if AFL.Awk.find() then return false end
         local h = AFL.Awk.hint()
         if not (h and h.Boss) then return false end
         local st = tostring(h.State)
         if not (st ~= "Dormant" or (tonumber(h.Seconds) or 9999) <= 150) then return false end
         local boss, now = string.lower(tostring(h.Boss)), os.clock()
+        if onlySel and not S.bossSelected(boss) then return false end
         for _, r in ipairs(S.routines) do
-            if string.find(boss, r.key, 1, true) then
+            if string.find(boss, r.key, 1, true) or (r.alt and string.find(boss, r.alt, 1, true)) then
                 if (S.cool[r.key] or 0) > now then return false end
                 S.began[r.key] = S.began[r.key] or now
-                if now - S.began[r.key] > 240 then S.cool[r.key], S.began[r.key] = now + 300, nil; return false end
+                if now - S.began[r.key] > 420 then S.cool[r.key], S.began[r.key] = now + 300, nil; return false end
                 State.Mode, State.Text = "Auto Awk Boss", "Awakening " .. tostring(h.Boss)
                 local ok, res = pcall(r.run, h)
                 if not ok then Diag.awk = "Auto Awaken error: " .. tostring(res); return false end
@@ -11309,37 +11347,105 @@ do local __ok, __e = pcall(function()
         end
     end)
 
-    -- ---------- Combat v2 (Advanced Combat): segredos + 11 Awakened bosses so com Combat ----------
+    -- ---------- Combat v2 (Advanced Combat): segredos + Awakened bosses so com Combat ----------
+    d("SubC2Kills", {})
+    local function c2Count()
+        local n = 0
+        for _ in pairs(Config.SubC2Kills or {}) do n = n + 1 end
+        return n
+    end
+    -- conta cada Awakened boss (por nome) que morreu perto de voce enquanto o Combat v2 esta ligado
+    task.spawn(function()
+        local cur, lastPos
+        while Alive do
+            task.wait(1)
+            if Config.SubC2 then
+                pcall(function()
+                    local e = AFL.Awk.find()
+                    if e and not string.find(string.lower(e.Name), "ice admiral", 1, true) then
+                        cur = e
+                        local _, er = aliveParts(e)
+                        lastPos = er and er.Position or lastPos
+                    elseif cur then
+                        local eh = cur:FindFirstChildOfClass("Humanoid")
+                        local _, hrp = getChar()
+                        if hrp and lastPos and (hrp.Position - lastPos).Magnitude < 150 and ((not cur.Parent) or (eh and eh.Health <= 0)) then
+                            Config.SubC2Kills = Config.SubC2Kills or {}
+                            Config.SubC2Kills[cur.Name] = true
+                            persist()
+                        end
+                        cur = nil
+                    end
+                end)
+            end
+        end
+    end)
+    local function pressNear(model, fallbackPos)
+        if not fireproximityprompt then return end
+        for _, o in ipairs(model and model:GetDescendants() or {}) do
+            if o:IsA("ProximityPrompt") and o.Enabled then pcall(fireproximityprompt, o, 1) end
+        end
+    end
     local function c2Step()
         local Sec = AFL.Sec
         if not Sec then note("Combat v2: Secrets module not loaded"); return false end
+        -- tudo automatico: segredos de TODAS as ilhas + gatilho/kill dos Awakened
+        if not Config.SecretAssist then Config.SecretAssist = true; persist(); pcall(function() Fluent.Options.SecretAssist:SetValue(true) end) end
+        if not Config.SecretAuto then Config.SecretAuto = true; persist(); pcall(function() Fluent.Options.SecretAuto:SetValue(true) end) end
+        if not Config.AwkOn then Config.AwkOn = true; persist(); pcall(function() Fluent.Options.AwkOn:SetValue(true) end) end
+        if not Config.AwkTrigger then Config.AwkTrigger = true; persist(); pcall(function() Fluent.Options.AwkTrigger:SetValue(true) end) end
         Sec.refresh(false)
         if not Sec.done then note("Combat v2: loading secrets progress"); return false end
         local n = 0
         for _, df in ipairs(Sec.defs) do if Sec.isDone(df) then n = n + 1 end end
+        local kills = c2Count()
         if n < #Sec.defs then
-            if not Config.SecretAssist then Config.SecretAssist = true; persist(); pcall(function() Fluent.Options.SecretAssist:SetValue(true) end) end
-            if not Config.SecretAuto then Config.SecretAuto = true; persist(); pcall(function() Fluent.Options.SecretAuto:SetValue(true) end) end
-            note(string.format("Combat v2 step 1/3: finishing the Island Secrets (%d/%d done) - Secret Assist + Auto Secret Steps are on", n, #Sec.defs))
-            return false
+            note(string.format("Combat v2 step 1/3: Island Secrets %d/%d (automatic) | Awakened bosses killed with Combat: %d/10", n, #Sec.defs, kills))
+            -- os Awakened ja liberados so valem com Combat: se ja tem Combat e sem fruta, usa Combat desde ja
         end
         local combat = tool("Combat")
         local hasFruit = false
-        local ch = Player.Character
-        for _, c in ipairs({ ch, Player.Backpack }) do
+        for _, c in ipairs({ Player.Character, Player.Backpack }) do
             for _, t in ipairs(c and c:GetChildren() or {}) do
                 if t:IsA("Tool") and t.ToolTip == "Blox Fruit" then hasFruit = true end
             end
         end
-        if not combat or hasFruit then
-            note("Combat v2 step 2/3: remove your Blox Fruit and fighting style at the 'Remove Blox Fruit' NPC (top of the Prison) - use the fly button below, then choose 'Remove my Fighting Style'")
-            return false
+        if combat and not hasFruit then
+            Config.Weapon = "Melee"
+            Config.ForceTool, Config.ForceUntil = "combat", os.clock() + 3
         end
-        Config.Weapon = "Melee"
-        Config.ForceTool, Config.ForceUntil = "combat", os.clock() + 3
-        if not Config.AwkOn then Config.AwkOn = true; persist(); pcall(function() Fluent.Options.AwkOn:SetValue(true) end) end
-        if not Config.AwkTrigger then Config.AwkTrigger = true; persist(); pcall(function() Fluent.Options.AwkTrigger:SetValue(true) end) end
-        note("Combat v2 step 3/3: killing the 11 Awakened bosses with Combat only (Auto Awk Boss + Auto Awaken are on). When the fountain is restored, talk to the Secrets Master in Middle Town (button below).")
+        if n < #Sec.defs then return false end
+        if not combat or hasFruit then
+            local npcCF = findNpc({ "remove blox fruit" }) or CFrame.new(5262.8, 345.9, 766.7)
+            if not goTo(npcCF, 12, "the Remove Blox Fruit NPC") then
+                note("Combat v2 step 2/3: flying to the Remove Blox Fruit NPC (top of the Prison)")
+                return true
+            end
+            if every("c2remove", 3) then
+                local npcs = workspace:FindFirstChild("NPCs")
+                pressNear(npcs and npcs:FindFirstChild("Remove Blox Fruit"))
+            end
+            note("Combat v2 step 2/3: at the NPC - remove your Blox Fruit, then choose 'Remove my Fighting Style' in the dialogue (that choice is manual)")
+            return true
+        end
+        if kills >= 10 then
+            local smCF = findNpc({ "secrets master" }) or CFrame.new(-838.9, 28.4, 1603.1)
+            if not goTo(smCF, 12, "the Secrets Master") then
+                note(string.format("Combat v2 step 3/3: %d Awakened bosses killed - flying to the Secrets Master", kills))
+                return true
+            end
+            if every("c2talk", 5) then
+                local npcs = workspace:FindFirstChild("NPCs")
+                pressNear(npcs and npcs:FindFirstChild("Secrets Master"))
+            end
+            note("Combat v2 step 3/3: at the Secrets Master - pick the Advanced Combat option in the dialogue")
+            return true
+        end
+        note(string.format("Combat v2 step 3/3: killing the Awakened bosses with Combat only (%d/10 done: %s)", kills, (function()
+            local t = {}
+            for k in pairs(Config.SubC2Kills or {}) do t[#t + 1] = (string.gsub(k, "Awakened ", "")) end
+            return #t > 0 and table.concat(t, ", ") or "none yet"
+        end)()))
         return false
     end
 
@@ -11413,7 +11519,7 @@ do local __ok, __e = pcall(function()
     tog("SubGod", "Auto God Human",
         "Buys / trains everything Godhuman needs (Superhuman, Death Step, Sharkman Karate, Electric Claw, Dragon Talon at 400 mastery), farms the materials (Fish Tail 20, Magma Ore 20, Mystic Droplet 10, Dragon Scale 10) and buys it at the Ancient Monk. Needs the beli / fragments.")
     tog("SubC2", "Auto Combat v2 (Advanced Combat)",
-        "Guides the Advanced Combat quest: finishes the Sea 1 Island Secrets (turns Secret Assist + Auto Secret Steps on), tells you when to remove your fruit and fighting style, then keeps Combat equipped and turns Auto Awk Boss + Auto Awaken on to kill the 11 Awakened bosses. At the end talk to the Secrets Master. Removing the style and the final talk are manual.")
+        "Automatic Advanced Combat: does ALL the Sea 1 Island Secrets (every island, ignores the selection), flies you to the Remove Blox Fruit NPC when they are done, keeps Combat equipped, triggers and kills the Awakened bosses (counted in Status), then flies you to the Secrets Master. Only the dialogue choices (remove fighting style / take Advanced Combat) are yours.")
     tog("SubV2", "Auto Superhuman",
         "Buys Dark Step, Electro, Water Kung Fu and Dragon Breath, trains each to 300 mastery, then buys Superhuman at the Martial Arts Master.")
     tog("SubDT", "Auto Dragon Talon", "Dragon Breath 400 mastery + Fire Essence (spend Bones at the Death King) -> Uzoth in the Third Sea.")
@@ -11454,6 +11560,8 @@ do local __ok, __e = pcall(function()
             if tok == mine then tok = nil end
         end)
     end
+    T:AddButton({ Title = "Reset Combat v2 boss counter", Description = "Forgets which Awakened bosses were counted",
+        Callback = function() Config.SubC2Kills = {}; persist() end })
     T:AddButton({ Title = "Fly To The Remove Blox Fruit NPC", Description = "Top of the Prison: remove your fruit, then 'Remove my Fighting Style' (needed for Combat v2)",
         Callback = function() fly(V3(5262.8, 345.9, 766.7), "Remove Blox Fruit NPC") end })
     T:AddButton({ Title = "Fly To The Secrets Master", Description = "Middle Town: final step of Combat v2",
@@ -12254,7 +12362,7 @@ end)
 AFL.modDone('diag', __ok, __e) end
 task.defer(function()
     local M = AFL.Mods
-    local msg = string.format("Build %s | %d modules loaded", "20261016-1545", #M.ok)
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1616", #M.ok)
     if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
     pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
 end)
