@@ -142,7 +142,7 @@ local Config = {
 }
 
 -- Cliques por segundo de cada modo de ataque (com variação aleatória de ±15%)
-local AttackCPS = { ["Normal Attack"] = 12, ["Fast Attack"] = 40, ["Super Fast Attack"] = 400 }
+local AttackCPS = { ["Normal Attack"] = 30, ["Fast Attack"] = 80, ["Super Fast Attack"] = 600 }
 
 local State = { Mode = "Idle", Text = "—", Busy = false }
 local Diag  = { bones = "—", quest = "—", summon = "—", elite = "—", gacha = "—", fight = "—", attack = "—", ken = "—", buy = "—", raid = "—", sea = "—", fog = "off" }
@@ -827,7 +827,7 @@ local function attackTick()
     end
     local cps = AttackCPS[Config.AttackMode] or 3
     if Config.Weapon == "Blox Fruit" then cps = cps * 2 end
-    if Config.Weapon == "Gun" then cps = math.min(cps, 8) end -- arma de fogo tem delay de tiro
+    if Config.Weapon == "Gun" then cps = math.min(cps, 24) end -- arma de fogo tem delay de tiro
     return (1 / cps) * (0.85 + math.random() * 0.3)
 end
 
@@ -931,8 +931,8 @@ end
 local NetAtk = { ready = false, inflight = 0, lastDone = 0, err = "starting...", remote = nil, id = nil,
     netModule = nil, seed = nil, reg = nil, hit = nil, cloneref = nil }
 -- Limites anti-crash: poucos alvos por ciclo, poucos ciclos simultâneos e intervalo mínimo entre ciclos
-local NET_LIMIT = { ["Normal Attack"] = 3, ["Fast Attack"] = 14, ["Super Fast Attack"] = 80 }
-local NET_GAP   = { ["Normal Attack"] = 0.06, ["Fast Attack"] = 0.012, ["Super Fast Attack"] = 0 } -- Super: sem intervalo (1 lote por frame)
+local NET_LIMIT = { ["Normal Attack"] = 8, ["Fast Attack"] = 24, ["Super Fast Attack"] = 120 }
+local NET_GAP   = { ["Normal Attack"] = 0, ["Fast Attack"] = 0, ["Super Fast Attack"] = 0 } -- Super: sem intervalo (1 lote por frame)
 local NET_MAX_TARGETS = 10 -- v28: bate em TODOS os mobs puxados (limite real = slider Bring Mob)
 local netLastLaunch = 0
 
@@ -940,7 +940,7 @@ local netLastLaunch = 0
 -- para 1 ciclo por vez e só volta ao normal quando o FPS se recuperar.
 local Perf = { ema = 0.016, slow = false }
 table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
-    Perf.ema = Perf.ema * 0.9 + math.min(dt, 0.5) * 0.1
+    Perf.ema = 0.016 -- v32: sem proteção de FPS
     if Perf.ema > 0.045 then Perf.slow = true elseif Perf.ema < 0.03 then Perf.slow = false end
 end))
 
@@ -1300,7 +1300,7 @@ local function fightEnemy(enemy, names, canPull)
     end
 
     watchStep(enemy, eh)
-    if Fight.inPos or near then Config.AttackUntil = os.clock() + 1.5 end -- liga o ataque automático
+    Config.AttackUntil = os.clock() + 1.5 -- v31: ataque ligado desde a aproximação (sem espera) -- liga o ataque automático
     Diag.attack = string.format("method=%s%s | height=%s | mob distance=%s%s | damage confirmed=%s | net=%s | cf=%s",
         currentMethod(), (Config.AttackMethod == "Auto") and " (auto)" or "",
         tostring(math.floor(h)), tostring(math.floor(pullGap())), Config.FixedDistance and " (fixed)" or "",
@@ -1453,7 +1453,7 @@ local function questStep(q, keepActive)
             -- contagem: perto do fim (falta no máx. 1 kill) 1s — é a conclusão normal, a janela some ao matar o
             -- último; longe do fim 6s — se a janela voltar nesse meio tempo, era só um piscar e NÃO termina a quest
             -- (antes, perto do fim ele "terminava" cedo demais e pegava outra quest com a anterior ainda em andamento).
-            local nearEnd = prog and prog[1] >= prog[2] - 1
+            local nearEnd = prog and prog[1] >= prog[2]
             local waitHidden = recentDeath and 20 or (nearEnd and 0.35 or (prog and 25 or 12))
             local finished = Quest.guiSeen and now - Quest.acceptedAt > 1.5
                 and ((complete and true) or ((not visible) and hiddenFor >= waitHidden))
@@ -2051,7 +2051,7 @@ function DHF.hasQuest()
         return not DHF.killsDone()
     end
     if DHF.killsDone() then return false end
-    if DHF.lastMax and DHF.lastCur and DHF.lastCur >= DHF.lastMax - 1 and os.clock() - DHF.lastSeen < 15 then
+    if DHF.lastMax and DHF.lastCur and DHF.lastCur >= DHF.lastMax and os.clock() - DHF.lastSeen < 15 then
         return false
     end
     local quiet = math.min(os.clock() - DHF.lastSeen, os.clock() - DHF.lastKillAt)
@@ -5080,7 +5080,7 @@ local saveAll, persist
 do
 local HttpService = game:GetService("HttpService")
 local SAVE_FILE = "MoonHub_KeyPro.json"
-local SAVED_KEYS = { "AutoAwaken", "RaceReroll", "RaceTarget", "RaceGhoul", "RaceGhoulHop", "RaceCyborg", "RaceV2", "RaceV3", "RaceV3Pvp", "RaceLever", "RaceGear", "RaceV4Auto", "MastOn", "MastKeys", "MastGunKeys", "MastMode", "MastMethod", "MastHP", "MastFast", "MastHold", "MastAllSword", "MastAllMelee", "MastAllGun", "PrioDefault", "UIScale", "MobileMode", "UIAspect", "UIAnimStyle", "UIAnim", "UIAnimSpeed", "UIW", "UIH", "UILock", "KitTP", "KitSpawn", "KitSummon", "KitCollect", "KitTrade", "KitAzure", "LevSpy", "LevFind", "LevSpeed", "LevBack", "LevStart", "LevTP", "LevBoatTo", "LevAttack", "LevFruit", "LevDragon", "LevFast", "LevHold", "LevWeapons", "LevKeys", "LevGuitar", "LevSkills", "LevHeart", "VulcRockW", "VulcRockK", "VulcTreeW", "VulcTreeK", "VulcPull", "VulcPullMax", "AimOn", "AimHitChance", "AimAutoPing", "AimFF", "AimFriends", "AimGate", "AimInfo", "AimMode", "AimTargets", "AimPriority", "AimPart", "AimFOV", "AimShowFOV", "AimFOVColor", "AimFOVOrigin", "AimSmooth", "AimPredict", "AimPredictOn", "AimMaxDist", "AimVisible", "AimTeam", "AimSticky", "AimTrigger", "AimKey", "AimHighlight", "AimLine", "AimMinHP", "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
+local SAVED_KEYS = { "AutoAwaken", "RaceReroll", "RaceTarget", "RaceGhoul", "RaceGhoulHop", "RaceCyborg", "RaceV2", "RaceV3", "RaceV3Pvp", "RaceLever", "RaceGear", "RaceV4Auto", "MastOn", "MastKeys", "MastGunKeys", "MastMode", "MastMethod", "MastHP", "MastFast", "MastGunAim", "MastHold", "MastAllSword", "MastAllMelee", "MastAllGun", "PrioDefault", "UIScale", "MobileMode", "UIAspect", "UIAnimStyle", "UIAnim", "UIAnimSpeed", "UIW", "UIH", "UILock", "KitTP", "KitSpawn", "KitSummon", "KitCollect", "KitTrade", "KitAzure", "LevSpy", "LevFind", "LevSpeed", "LevBack", "LevStart", "LevTP", "LevBoatTo", "LevAttack", "LevFruit", "LevDragon", "LevFast", "LevHold", "LevWeapons", "LevKeys", "LevGuitar", "LevSkills", "LevHeart", "VulcRockW", "VulcRockK", "VulcTreeW", "VulcTreeK", "VulcPull", "VulcPullMax", "AimOn", "AimHitChance", "AimAutoPing", "AimFF", "AimFriends", "AimGate", "AimInfo", "AimMode", "AimTargets", "AimPriority", "AimPart", "AimFOV", "AimShowFOV", "AimFOVColor", "AimFOVOrigin", "AimSmooth", "AimPredict", "AimPredictOn", "AimMaxDist", "AimVisible", "AimTeam", "AimSticky", "AimTrigger", "AimKey", "AimHighlight", "AimLine", "AimMinHP", "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
     "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones",
     "Weapon", "AttackMode", "Bring", "TweenSpeed", "AutoBuso", "AutoKen", "AutoV3", "AutoV4",
     "RemoveFog", "FpsBooster", "ToggleKey",
@@ -5336,9 +5336,9 @@ AFL.SecretDefs = {
 }
 AFL.SecretList, AFL.SecretKey, AFL.SecretManual = {}, {}, {}
 for _, d in ipairs(AFL.SecretDefs) do
-    local label = d[1] .. " - " .. d[2] .. (d[3] and "" or " [manual]")
+    local label = d[1] .. " - " .. d[2] 
     AFL.SecretList[#AFL.SecretList + 1] = label
-    if d[3] then AFL.SecretKey[label] = d[3] else AFL.SecretManual[label] = true end
+    if d[3] then AFL.SecretKey[label] = d[3] end -- v32: todas automaticas (sem [manual])
 end
 function AFL.secretFind(key)
     for _, e in ipairs(enemiesList()) do
@@ -6407,6 +6407,12 @@ do
                 if t:IsA("Tool") and string.find(string.lower(t.Name), "volcanic magnet", 1, true) then haveMagnet = true end
             end end
         end
+        if not haveMagnet then
+            local ok, has = pcall(function()
+                return hasItem("Volcanic Magnet") or invCount("Volcanic Magnet") > 0 or (AFL.Inv and AFL.Inv.count and AFL.Inv.count("Volcanic Magnet") > 0)
+            end)
+            if ok and has then haveMagnet = true end
+        end
         if haveMagnet then Diag.vulc = "already has the Volcanic Magnet: skipping to the island"; return false end
         local scrap, ember = invCount("Scrap Metal"), invCount("Blaze Ember")
         if scrap >= 10 and ember >= 15 then
@@ -6615,7 +6621,7 @@ do
             State.Mode = "Auto Find Vulcan"
             Diag.vulc = "sailing to Sea Danger Level 6, ignoring sea events"
             MV.equip("volcanic magnet")
-            return MV.sail(6)
+            return MV.sail(0) -- sem trava na zona 6
         end
         return false
     end
@@ -6926,7 +6932,7 @@ do
     local idx = ({ ["Normal Attack"] = 1, ["Fast Attack"] = 2, ["Super Fast Attack"] = 3 })[Config.AttackMode] or 1
     Tabs.Farm:AddDropdown("AttackMode", {
         Title = "Attack Method", Values = { "Fast Attack", "Super Fast Attack", "Supreme Fast Attack" }, Default = idx,
-        Description = "The faster, the higher the ban risk. Has an automatic brake if the FPS drops.",
+        Description = "Quanto mais rápido, maior o risco de ban. Sem proteção de FPS: clica o mais rápido possível.",
     }):OnChanged(function(v)
         Config.AttackMode = ui2mode[v] or "Normal Attack"
         persist()
@@ -7138,14 +7144,14 @@ Tabs.Normal:AddSection("Normal Farm")
 subTitle("Farm Level")
 addModeToggle("AutoLevel", "Auto Farm Level", "Level", false)
 
-subTitle("Secret Quest")
-Tabs.Normal:AddToggle("SecretOn", { Title = "Auto Secret Quest",
+Tabs.Secrets:AddSection("Auto Secret Quest")
+Tabs.Secrets:AddToggle("SecretOn", { Title = "Auto Secret Quest",
     Description = "Sea 1 Island Secrets, fully automatic for what you select below (empty = all): flies to each pending secret, kills its enemies, presses its prompts, triggers the Awakened boss of the islands you picked and kills it. A few puzzles are still yours (pipes, crystals, statues, lookout...). Full guide in the Secrets tab.",
     Default = Config.SecretOn and true or false })
     :OnChanged(function(v) Config.SecretOn = v; persist() end)
 do
-    local sd = Tabs.Normal:AddDropdown("SecretSel", { Title = "Auto Select Secret Quest", Values = AFL.SecretList, Multi = true, Default = {},
-        Description = "Which secrets to automate. Empty = all. Picking an Awakened boss also does the 2 secrets of its island first. [manual] = no boss to kill, the script only runs the steps it knows." })
+    local sd = Tabs.Secrets:AddDropdown("SecretSel", { Title = "Auto Select Secret Quest", Values = AFL.SecretList, Multi = true, Default = {},
+        Description = "Which secrets to automate. Empty = all. Picking an Awakened boss also does the 2 secrets of its island first. Every secret is automatic: flies there, kills the enemies, presses the prompts." })
     sd:OnChanged(function(val)
         local set = {}
         if type(val) == "table" then
@@ -7686,7 +7692,7 @@ do local __ok, __e = pcall(function()
                     task.wait(6)
                 end
             end)
-            if not ok then note("No " .. bossName .. " server found in the API (will retry)") end
+            if not ok then note("No " .. bossName .. " server found (will retry)") end
             joining = false
         end)
         return true
@@ -8025,7 +8031,7 @@ do local __ok, __e = pcall(function()
 
     T:AddSection("Ghoul")
     tog("RaceGhoul", "Auto Ghoul", "100 Ectoplasm (Ghost Ship mobs) + Hellfire Torch (Cursed Captain), then buys Ghoul. Second Sea")
-    tog("RaceGhoulHop", "Auto Ghoul Server Hop", "No Cursed Captain here? Joins a server that has one (Quantum API)")
+    tog("RaceGhoulHop", "Auto Ghoul Server Hop", "No Cursed Captain here? Joins a server that has one")
 
     T:AddSection("Cyborg")
     tog("RaceCyborg", "Auto Cyborg", "Fist of Darkness (chests) > Order boss > Microchip > Core Brain > buys Cyborg (2500 fragments)")
@@ -8986,7 +8992,7 @@ do local __ok, __e = pcall(function()
     local function d(k, v) if Config[k] == nil then Config[k] = v end end
     d("MastOn", false); d("MastMethod", "Blox Fruit"); d("MastHP", 40); d("MastKeys", { Z = true, X = true, C = true, V = true })
     d("MastGunKeys", { M1 = true, Z = true, X = true }); d("MastMode", "Finish at Health %")
-    d("MastFast", true); d("MastHold", 0.3); d("MastAllSword", false); d("MastAllMelee", false); d("MastAllGun", false)
+    d("MastGunAim", false); d("MastFast", true); d("MastHold", 0.3); d("MastAllSword", false); d("MastAllMelee", false); d("MastAllGun", false)
     local KEYS = { "Z", "X", "C", "V", "F" }
     local ki, keyAt = 0, 0
     M.status = "idle"
@@ -9024,7 +9030,19 @@ do local __ok, __e = pcall(function()
         Aim.part = part
         if set.M1 then
             if kind == "Gun" then
-                if Config.ShotFire then pcall(Config.ShotFire, { kind = "gun", part = part }) end
+                if Config.MastGunAim then
+                    -- aimbot de gun: crava a câmera no mob e clica com a arma (Tool:Activate)
+                    pcall(function()
+                        local cam = workspace.CurrentCamera
+                        if cam and part and part.Parent then
+                            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, part.Position)
+                        end
+                        local char = Player.Character
+                        local tool = char and char:FindFirstChildOfClass("Tool")
+                        if tool then tool:Activate() end
+                    end)
+                    if Config.ShotFire then pcall(Config.ShotFire, { kind = "gun", part = part }) end
+                elseif Config.ShotFire then pcall(Config.ShotFire, { kind = "gun", part = part }) end
             else
                 pcall(FruitM1.tick)
             end
@@ -9173,6 +9191,7 @@ do local __ok, __e = pcall(function()
     T:AddDropdown("MastKeysDD", { Title = "Fruit Attacks", Description = "M1 = fruit click, Z X C V F = skills. Used on the mob with the aim locked on it", Values = { "M1", "Z", "X", "C", "V", "F" }, Multi = true, Default = copy(Config.MastKeys) })
         :OnChanged(function(val) Config.MastKeys = setOf(val); persist() end)
     T:AddSection("Skills (Gun)")
+    tg("MastGunAim", "Gun Aimbot (gun click)", "Locks the camera on the mob and clicks with the gun (Tool click) on every shot of the Farm Mastery / ALL Gun 600")
     T:AddDropdown("MastGunKeysDD", { Title = "Gun Attacks", Description = "M1 = gun shot (click), Z X = gun skills. Also used by Auto Farm ALL Gun 600", Values = { "M1", "Z", "X" }, Multi = true, Default = copy(Config.MastGunKeys) })
         :OnChanged(function(val) Config.MastGunKeys = setOf(val); persist() end)
     tg("MastFast", "Use skill fast (don't hold)", "Taps the keys quickly. Off: holds each key for the time below")
@@ -12009,7 +12028,10 @@ do local __ok, __e = pcall(function()
         if Config.KitSpawn and not k then
             busy("Looking for Kitsune Island")
             SE.kit = "sailing like Sea Events (zone " .. tostring(Config.SeaZone) .. ") | " .. tostring(Diag.sea)
-            if Sea.step(not Config.SeaOn) then return true end
+            Sea.zone = 6 -- Kitsune: única que trava na zona 6
+            local sr = Sea.step(not Config.SeaOn)
+            Sea.zone = nil
+            if sr then return true end
         end
         SE.kit = "idle"
         return false
@@ -12192,7 +12214,10 @@ do local __ok, __e = pcall(function()
         if Config.LevFind and not FD then
             busy("Looking for the Frozen Dimension")
             SE.lev = "sailing like Sea Events (zone " .. tostring(Config.SeaZone) .. ") | " .. tostring(Diag.sea)
-            if Sea.step(not Config.SeaOn) then return true end
+            Sea.zone = 0 -- Leviathan: sem trava de zona
+            local sr = Sea.step(not Config.SeaOn)
+            Sea.zone = nil
+            if sr then return true end
         end
         if FD then SE.lev = "Frozen Dimension is open" else SE.lev = "idle" end
         return false
@@ -12362,7 +12387,7 @@ end)
 AFL.modDone('diag', __ok, __e) end
 task.defer(function()
     local M = AFL.Mods
-    local msg = string.format("Build %s | %d modules loaded", "20261016-1616", #M.ok)
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1657", #M.ok)
     if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
     pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
 end)
