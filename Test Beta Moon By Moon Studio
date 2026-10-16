@@ -911,7 +911,7 @@ end
 local NetAtk = { ready = false, inflight = 0, lastDone = 0, err = "starting...", remote = nil, id = nil,
     netModule = nil, seed = nil, reg = nil, hit = nil, cloneref = nil }
 -- Limites anti-crash: poucos alvos por ciclo, poucos ciclos simultâneos e intervalo mínimo entre ciclos
-local NET_LIMIT = { ["Normal Attack"] = 2, ["Fast Attack"] = 10, ["Super Fast Attack"] = 70 }
+local NET_LIMIT = { ["Normal Attack"] = 3, ["Fast Attack"] = 14, ["Super Fast Attack"] = 80 }
 local NET_GAP   = { ["Normal Attack"] = 0.06, ["Fast Attack"] = 0.012, ["Super Fast Attack"] = 0 } -- Super: sem intervalo (1 lote por frame)
 local NET_MAX_TARGETS = 10 -- v28: bate em TODOS os mobs puxados (limite real = slider Bring Mob)
 local netLastLaunch = 0
@@ -1062,6 +1062,21 @@ doNetAttack = function()
     return true
 end
 
+-- v29: Melee/Sword no Auto/Net: o Net também dispara a cada Heartbeat e a cada Stepped (3 motores: loop + 2 sinais),
+-- então o ritmo não depende mais só do loop de ataque. Os slots/limite/freio de FPS continuam valendo.
+for _, sig in ipairs({ RunService.Heartbeat, RunService.Stepped }) do
+    table.insert(Connections, sig:Connect(function()
+        if not Alive or not NetAtk.ready or Watch.skip["Net"] or not doNetAttack then return end
+        if not ((State.Busy or State.Mode ~= "Idle") and os.clock() < Config.AttackUntil) then return end
+        local sc = Config.SeaClick
+        if os.clock() < Config.SeaUntil or (sc and os.clock() < (sc.untilT or 0)) then return end
+        if Config.Weapon ~= "Melee" and Config.Weapon ~= "Sword" then return end
+        local m = Config.AttackMethod
+        if m ~= "Auto" and m ~= "Net" then return end
+        pcall(doNetAttack)
+    end))
+end
+
 -- ============ LUTA (posição, puxar mobs, medir dano) ============
 
 -- Altura efetiva: a escolhida nas Settings; desce sozinha se o ataque não causar dano
@@ -1144,7 +1159,7 @@ local function watchStep(enemy, eh)
     end
     if Config.AttackMethod ~= "Auto" then return end
     -- tentando um método alternativo: dá só 1,2s; se também não causar dano, volta ao que já funcionou
-    local limit = (Watch.good and Watch.mi ~= Watch.good) and 1 or 1.5
+    local limit = (Watch.good and Watch.mi ~= Watch.good) and 0.45 or 0.7
     if now - Watch.lastDmg > limit then
         Watch.confirmed = false
         Watch.lastDmg = now
@@ -2036,7 +2051,7 @@ end)
 
 -- ---------- pegar a quest ----------
 function DHF.take(data, reason)
-    if os.clock() - DHF.lastTry < 6 then return end
+    if os.clock() - DHF.lastTry < 2 then return end
     DHF.lastTry = os.clock()
     if DHF.uiActive() then DHF.takenAt = os.clock() return end
     -- já pegou uma quest e ainda não matou todos os mobs dela: NÃO pega outra
@@ -2054,15 +2069,18 @@ function DHF.take(data, reason)
         local sp = DHF.nearestSpawn(data.Mobs)
         if sp then cf = sp.CFrame * CFrame.new(0, 12, 0) end
     end
-    if cf then DHF.flyWait(cf, 90) end
-    if not Alive or Config.Mode ~= "Level" then return end
-    if DHF.uiActive() then DHF.takenAt = os.clock() return end
-
     local function start()
         invoke("StartQuest", data.Quest.Name, data.Quest.Level)
-        task.wait(0.6)
+        local t0 = os.clock()
+        while os.clock() - t0 < 0.7 and not DHF.uiActive() do task.wait(0.05) end
     end
+    -- tenta aceitar sem sair do lugar (se o servidor aceitar de longe, economiza a viagem toda)
     start()
+    if not DHF.uiActive() then
+        if cf then DHF.flyWait(cf, 90) end
+        if not Alive or Config.Mode ~= "Level" then return end
+        if not DHF.uiActive() then start() end
+    end
 
     -- não apareceu: vai até o NPC mais perto da área e tenta de novo
     if not DHF.uiActive() then
@@ -9804,6 +9822,17 @@ do local __ok, __e = pcall(function()
     T:AddSection("Interface")
     T:AddToggle("MobileMode", { Title = "Mobile Mode (lighter)", Description = "Slower status refresh and fewer effects. Turns on by itself on phones/tablets", Default = AFL.mobile and true or false })
         :OnChanged(function(v) Config.MobileMode = v; AFL.mobile = v or touch; persist() end)
+    local function d(k, v) if Config[k] == nil then Config[k] = v end end
+    d("UIAnim", true); d("UIAnimStyle", "Smooth"); d("UIAnimSpeed", 1)
+    T:AddSection("Animations")
+    T:AddToggle("UIAnim", { Title = "Smooth Animations", Description = "Tab pages zoom in smoothly and the moon button spins when you open/close", Default = Config.UIAnim ~= false })
+        :OnChanged(function(v) Config.UIAnim = v; persist() end)
+    local styles = { "Smooth", "Soft", "Snappy", "Bouncy" }
+    local si = 1; for i, v in ipairs(styles) do if v == Config.UIAnimStyle then si = i end end
+    T:AddDropdown("UIAnimStyle", { Title = "Animation Style", Description = "Smooth (default), Soft, Snappy or Bouncy", Values = styles, Default = si })
+        :OnChanged(function(v) Config.UIAnimStyle = v; persist() end)
+    T:AddSlider("UIAnimSpeed", { Title = "Animation Speed", Description = "1.0 = normal; lower = slower, higher = quicker", Min = 0.5, Max = 2, Default = tonumber(Config.UIAnimSpeed) or 1, Rounding = 1 })
+        :OnChanged(function(v) Config.UIAnimSpeed = v; persist() end)
     T:AddParagraph({ Title = "Resize", Content = "Drag the bottom-right corner of the window to resize it. The moon button opens and closes the window." })
 end)()
 
@@ -9856,7 +9885,7 @@ end)
 AFL.modDone('diag', __ok, __e) end
 task.defer(function()
     local M = AFL.Mods
-    local msg = string.format("Build %s | %d modules loaded", "20261016-1308", #M.ok)
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1330", #M.ok)
     if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
     pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
 end)
@@ -10204,8 +10233,31 @@ do
         return tween
     end
 
-    -- interface Fluent padrão: sem UIScale, sem trocar o AnchorPoint, sem substituir o Minimize (animações nativas do Fluent)
+    -- interface Fluent padrão (sem UIScale na janela, sem trocar AnchorPoint, sem substituir o Minimize).
+    -- Animação extra, leve e isolada: cada página de aba "entra" com um zoom suave quando fica visível.
     AFL.uiScale = 1
+    if root then
+        local function hookPage(sf)
+            if sf:GetAttribute("MHPage") or not sf:IsA("ScrollingFrame") then return end
+            sf:SetAttribute("MHPage", true)
+            local us = Instance.new("UIScale")
+            us.Name, us.Scale, us.Parent = "MHPageScale", 1, sf
+            sf:GetPropertyChangedSignal("Visible"):Connect(function()
+                if sf.Visible and Config.UIAnim ~= false and not AFL.mobile then
+                    us.Scale = 0.96
+                    tw(us, 0.38, { Scale = 1 }, AFL.animStyle("Out"), Enum.EasingDirection.Out)
+                end
+            end)
+        end
+        local function scan()
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("ScrollingFrame") and d.Name ~= "TabHolder" and d.AbsoluteSize.X > 250 and d.AbsoluteSize.Y > 150 then pcall(hookPage, d) end
+            end
+        end
+        pcall(scan)
+        task.delay(1.5, function() if Alive then pcall(scan) end end)
+        task.delay(4, function() if Alive then pcall(scan) end end)
+    end
 
     -- ---- Toggle GUI button (mobile friendly) with the moon image ----
     local MOON_B64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAWRUlEQVR42uVba4xd51Vda3/nXs+M7cR2/MrYHo/b1PZ4nDiOJ3HStGlDXlBAAiRAKaVCqkAUKFJ5SfziB/wBgSqBBAiJVxPSVpUA8UhTGlJIStrEedrxjNM4rl9p7CZOaqd+3HvPtxc/vu8794xtUZM0paITRRmd3Dv3nP3tvfZaa+8LfJ//8Lv0OWdJBklsf7DSryJJSe1rADAAMPb/JAB0QGpfIKF5V86/SDiEztt9Z9XbEND7AXwLQIdAZYH6zd/6HQfJK5ZfQQKKMcIBLuh2IXctX3YZe/0+qqqDYKaH/uNL6HYq+6u//LN/8xhNwBkADqAL4IfnJ8r3VgAA4E4CKMnuUXj3e2+lvEan04UZ4A6YoWQ9VixbDJIAATlw8o0++oOIGOPtTHWR/hzPy6PvoQCU8uVtt90FEux2u4ruIMk3Tn0Tg35Ur3cOgEAzSSIk9Xo1L7tuGhJ06uQp0Awjo2O8fEkHH/jAj4JmAMATr54ASH3ly49UORvaofD/Kwz4JQJ/Uk4mBMM//etD6ablEEgj9fy+r0IS3JXKHAQpSOmNU1s2kzTMze5TVRk2T22EZAUR6A48//wc6hr67d/4eQyi2rjxuKSbvtsZYAAwOrpwUa93Nl0g8/2YFB3RnRAQCboc7srhJgjAXQxmih5Jo+BgqAx1dNYRMLhEECDMiHO9AUYWVHSYQkADliRDjNHebCa82QzoEwg/9uM/iV/4xV+lIEBAqALu+eRfCwIcQrBAuYMJ0mUkIGL7jhmAxqktm0SlKheB22bWpxIhCQiEQRAE4OGnjmBQRxgIB3Di1Vf1yiuv8hOf+F0dPngIJAYSRt7USb6ZHwHoD/oUYsprAHV0GBK6BVp5eIFEFUIKNksmSA1SQpQ7KaflVDJafnQCJNxdRsgMCpY6iSAoJvwsgPp2ZkAA0Aegf/znf2fV6eCzn76PdT3QG2+8wdOnT0oSSOKabTu4du1kDpRS0pN6cteX0elUuPtnPpzvOt24KLA8KwDSAEjv37GeKRw5x9KfBwDsP/qajhz7Fl/46gs41+uLAH7t479QzmYBgPh2ZQDHRrswDoMXKpNHBwEEMywYGZFLGaaZ26HT3XHm7LmU8+6oKkOoDAZAcIQQYCGABoCBnSqgCs1JNQ9PEh6dkEsASIBmKXj/y7K+1BfXAPgvDzxMCrrvvntACcePH0V0h1nIZyatHp9APtx0r5Ku2T4DA7hlejqFPHVAzM3OyYzYtGkjLRCze59XeW89iNi2bSv6A+ddN21oyq6UEZFeuGv2ZbxxZgB3T1co/NCdt6SsEcJ3KgNSoOSgiVUw0Eh3R0jIJpKwYDQzksZ8GVI6IdEkCR4b9EZ056COqDqV5JDLU4N3h4XUPTqdCsOTz/+qNEgquiD3FBSSIfGGSyZM1bep+bME8M+f+0/WdY0//sTvI7pAiGaWc7JVC7lex9es1/IVK8plbtmyGWam2b2zcgce+Nzf5zQWzIAq5/n09DRDYIESPffcXvTODSRFji6ocNPVa0Bj81GEuHPrleenMe///BcVa/BHPvD+fr7WfbM8IIhgMIN1upAkKbW16A5L6C8idQEq3VqnEwAIBoPDi8ihiwoVYSTruhYzH5aLZiZA8MLxLKV4VVUIISTenMCiQGIG2HlqKrfjLjuVlUN8Uxlw18jIwtXvfe8tdAH33vM3cAHujhYmY+XqCVQdw9kzZ/H6668IErZtn+GRQwfxtQMvChLMjGYGd2HPs0/SAY2vWS+BOHr4AEAiq+F0phJn984ihAqbp6YAge+7bt28B52nC8p/jYALNOLW69ZBtDZF3whgHYAvnk+WLhoAEvfXg3P4+G/8NtyFT3/qXjEOMd3MIAFShNxQVRXggFWp15sRNDIdrpRocoXojm6nm06fQNUJqAcR7pEWqkKCQDPFGBEqY78f8wNTkBNgxoSGQyBTqeZgCgKSYMaCuRyJZQBOftsAKP0dIvP7l44eRDDLp2VYuXptesh0YqiqDq5csw4gsfuZJyCkUpVIGfDM07sgd83csBMxQs8+vQsQsWrVupy1Jkt0mmIOLsT3X7eu4Qtn+zX/66lDunrjaq5aOgYW4tBwDRv2SYiE8PkHH5W74wfveE/pIPGSukC73wJAFQIT6LI5pQSC6RpbHF8uySV3CEZIkrvLzFDX6bSiKwOG6C5UgYgS+v0BDIK7M4U3kyUCcXAOZkb3mIVVaYxswXDKAim3CziCDdNlyZIl1f+EAS+RXC0Jn/2HBzk2GvSHf/B7DMGgrNzT81LfOHYELmHFyiuxoDtCeZSZpSAZeeWV41i6bDmu3b4NHmt+5lP3aTCI2Do9xdxFEJ0wSweTybE+8+m/gwTNXL+TBd5CCPjCYwcgdzz77B68fnK9li1ZSgH4gZl1+Z05E3L7yGis22/YQJJ4+EtPAjTecvP2E7kUrASlmqepc8GMjnQwGERYoGKMueaFQu4kwYLB3enuIi3fyDBUnRAAFwBDjM4QDJ4Je4wALbHDcngSKEEhGABLTUCOpAah02d6CIEIZkyfP3xjgcaSsQThAmJM7z99+kzuTCm92bDU+QHoFvYmd1TBsHLlWoDEsWOHUZ6eRoyPr4cEnHj1mE70zxU+IBIwUosWLeLylSu1Z+9zMJA/fffPIrcl1B5hBpiZNk5totGwe89zqIJh5oYb4dFRbu9P73kQLulXPnwHo3UwOjba6KMYlXPHhq2xgD4zWcxlceeNGyDFJksujgHEmTYIuMRghmCWodQQggEO0ALNCKsCEwdMOJA6Q5LFCRoIF9TtmhwOQgo0iAZaan8gZOnzkp4wAnApOmi5N1pAXQ+UiK4SE8yCWe5Db615lBSOcj8C4LI2vF0UA0YaCE33jpe+fjh3MzIEYvX4hNyVDdv0IjNmmZZcoFVXTuDkN09q99NPQgKKKKqM8nRgevqJx+ESHn/sUZgRH/zQz4G5kCVg3+ycrBOwadMmGIA/v+fzqGPE1JapHGjBADz0+CEMakfRCiX9Exao1dUEI+brifMzgOAClopMzE2BqR1ZIiqChCoEemrukrssEGSqyxyV4vjA5TAClaWrITC18qwaMx0uQgq5d6cTi2mIYMEwqCM8M09D7j655qtQ8CI/TM6MZuigTJrPs9/nW/FAvP9zD1MAqyrgvns/iejS8ZcPU5LGxycSFrx8FJBj9fj6dsQ5GPT0yisvgwBWj09g9fgErly9mi4HJJFGGPHUrq/IXdh5082Qiy5HMNPjjz3Kbrejn777ZwkA++b2CcOS4q6vPCIL6axuvPFmbp6aymIIGNTCHTdMZOKRKTl0nthNWfjgYwdRBcORw4f0kY98EBCs0pDgpc7pKSrBhjZLsfPkDtpwgMHiZlkAQFSdCjEKo6MLmBCfYDBAQowO0tjpEB5d5UNjFI1QrzeAlHSDK2WdJdqpEALdgRCIqlvl+s56QMrOsaAsk+XnFXthFSSMVvxKAUCVU47J1hKqKuDlrx9CjMm+dheOv3wEIGDBKAAxRoVgeO3EN3D27BmMjIxi7bpJ9Ho9zFx/A44ePYz9X31e1++8iXJw46aNqAK1+5kn8uGkWy0lc+2OG9HtVGg5YACIqS2b0O12+diXH5EUce2O92DZ0uVUecI20l1A5Nh4BzlZcPsNkwCgRaNnm0owqcmQBiVcw1+Mpa6AGBPFC1WAxIYFkmkAsnBslBLZ79U5ZVNQE8o3tnHiA42VAwQj3QVmzgVlMeiiK2kPlxCCNSebeInPq+cLYI5Fq3JoFREs9yK1uoDcgYzoCYysmcOMr52EXDj28mEA0EtHDoIErlixGkuXLUdmgOj1a+1+9gl885uv4czpb2HXY19GqEyQ0yUEs6aTFZkMJZeXchZFmDBV6cFj1I6Zm5g9Ug7qCChJ7lu2jYMt85SZprtaOJCpQdP/WwenHOiiqdCIqfQCFf7v0fPhpT9bDN5yLcldL2SJ8ggS6HSCCKMgmAW4hOgRFgwgFYIpkUghdRag5fAyuhK5ssZe1OhIF6Tk7qAZMsg3WTrkBEVLCGjbNkTmDpkHNHjJ0tmHbWzNmnUY1MK1111PCPj85w4BMKxctQ4ho6RLWLFiOW+7/U4YKZf01JO7sP+FFzJRS1otkNq2fYYA+dSTj4MC7v7Qh2llJijH3NzzYKI5iQ/s24fBoMY110w3XsGm9Zdj7colbPf4ogktl1yxjxuPodjJRTO0lFTVlsBF3UlJ00cHqspgBWXz/CfZVkJVVbR0bnnGn9535nSPJFHHKAoKZJOmxsT3+71BdpQkCvRs8g59DDBGh5HJhEKmvqGSXBlCOM8haXzo83CBLfdEEkIVkKdzQwxIdUFIjnUTG1DXzu07ZgBQTzz+qMwqWhroYTCoUVWVbrzpZk6sn2D/3DnNze3LlBa85trteN+t78Ozz+xmCCHXvRgswOW8dtsMBGB2di4ZJy5IogWTR3Hr1ikl2ZvU5RDTDfsPvsb9B1+H5zR2EXfsnIAa6w0wpT7TrBq0gBPIzpYu5gfkjlLH3O+z1jQLpEFmCcG73S6iO0ZHu+lGcq/wRPMUQjI8mZyhLKPLPLzFyggoZi7PpA6TavTMHK20RqmktyN/ZhZFXuc/ZUMqnCWysWBKNm9LhrfaRdU0jFYJME9zspuV/4Rxxao1CmY8fPgAglHP7Z3TqpWvw6GWEAXi0KZuExG54hCcy2SowYDySdLs3jlIwvT0Flpl2LN7LwFpenoLC6qHEPD+69Zm2o6GDueiglqfYZY0ScmGKoQLxZBZms64O0jLgSjyMoUy0BijJ9ICsAoBnjV7IVIuT1ntYnuc4+4s3SU7N8wMDPKUXVKGYjPBY364lAnKNexCwY5iQaTrrqFj1bb2zpPKVAL4kgJVaZMx21CgcPW26wqDZtMjJVxz7Q6AxJ49AV4LLx09gpeOHMLI2EK9a+NmFDPk6NGjTXtsTofKAFRh08Z3JR2fzFx5GnJibt9cKRGShn1zc6ij6+qt0ymF5C3egPmM34b7RSIaN7Q5hOFGVrHJmja4i2R85OGHZvr9nkniuol3gjC5p3kdIMQ6UhACTRQZQqLEdXQskIYlBKL12Q3ykiaj6FF58i0Vpqc02tOwGzU8hNngK+QMrtSLLAdQLQ+gSPK2f97uAAdePoF+r4d9X31RZtwtT3IDV111FQ4c2H/cHcsB8I8+8RcwMz391GNwETtmrudQYAzHjy++8DxOnTqphYsWcePGqexzaUhMGmKj5ABt3JgmP56a0H33/m3jTpkR126/vshvxOiY3rqlobHliba88wqsWjKaGWBhfMMFu2HGlUtD1tdZsras5UFSmNcF5M0URbnkKZCdEBA9PUDCBoBidm8CSGOVWl0iI8aGFZJUEalxEEkS7qm/e3QmaCXNjE365AyKHltUNud7GiA2eMOGuirXe37YrAjzzbZwoFGydgEICjgFYCkAbpnekgxFUu4JuSVxenqq0E2aGRYuXISz585gOBejNk9t5rFjx/DqiddhEhGgzZunZLQM19Cn7/s7AsDM9TdIWRzIReXJTvufxomF5nH6ptTmJ0iTFe26nzfySO+vL2aJdVsvYj5JmgXUgxrSQGY2lFWSqk5gPC1VISF4uYv+oAbpkkh5CraXTHVgMBgou8xUy5BoMtkKhS9SlohyVNUQWNlus3k6VEqutbQGgeh0CMTGghCJqtEC502DC55k84AIZtp89VYC4OzsnJKZkMTNhndMYu3atTx3rocDB14EBO6dncWa8XGsW7eGu3c/p05FyEXSm13A6294N5lLpbRatTouXLJAuKeDIIG677h95zvA+RJvSIPlTfq3cYE0PPjYQeSKUjFxLsiAqsJPAdVYp9M5+esf/+ij0YWPfew3YSEwT4GzJg+NbdHv9TE2NoYQTAVtyGR9JzsxSYQ2H81MTEptV2XdId1Sa9yjYmyzmDMtzZI7e4vyp9W8NigOidnXDryIzoKOAPwxyYG7Xr8gAHWNR4AadV1jdvY5hBBw1carcjyFwiAl8ZkndwEEXp28CkuXXA6SmUOkU60srbvRSrdmMzoXgOnpKQLE7N7Z3LNTF5jaMo2yUJ2cRKF24c6dk+l0feh1cX5ht2y64V6Sstvzyx/9CAaDAQB8vEy45wVg//79F1sC47xBgsjR0VEBwMJFiyA5FnSq5nWLFi+UO7Hs8i6Xr7gMixeO4eDYGDudKs0uBPR6Z+EuLlw4BhJYsWJ56wRbg4Usyt4xsQxJKPnQK9P8p2+WLn1I2kv6nTrTIzGcZ+oiayPV/7A4pAZX8yBiw+QkXdLp02dorQHC6Oio1k9MoDdw3nXTZHY0DMdePY1OFQrxxYsvfg1GYnp6CyRgxcqVDVS7NOTrAgbRMbl6cWPSlIHI+VPs+akwXKORyKfmjqe5hC7+8N9uSSoQGAjAA1/4EgjiXZPLQBB7X/h6M+kFicsXj2DHlitVdRbwbz7zYJkbYnLynfMGFKmbuL526AjTwmMitZs2XkV3x503bii8Nu2NRcf5fsUFD16u68K5z+jyDTBC/cGgg8ZQ+F+syDQOWQ7WuhWLQBpeOLQAoSqLCckOH+12IDl6vX7ZipIlVZRm9yZVnQoS6HUNH7atNDLKgqYZ4w8ZcKbGDc7Oe472VzBSJ8jmjYhYD1Rf1C29tADE0hrvuuM9EQCe2PUESOJdE0vR7PcA6FYhzz8MNNNliy/josUL8/9nMitknHrnCsRBH6+9tlwAefz48SxdlTdD0bjFwrBFFnaYRnLnuz0tlM1B6y6ZSGQGIXy7fclLWpZmZhqvneozRuHqd1wBMpyPR+lGXVi4aAyXLV5MNSQlndz40hEII1i2dBlhxPFjxxu1pmZ7dujuZocY86ydlpuR+z6zhd6UQnHgdAnLopcUAAFdSPjB228eiMC//OsX0el0eOvM2qEVmbn65qlNdFfD5IzErTsmGryYX7Pp9z17ZiWJkssF3rlzsnk/W/U/LHM1MoYQXKn9jq3YkDfZtOBSN8cvdV3eh8OIZEkVFielr3+kqk/Lk4WLWR6eFxrAoWEpUAwWlKZRRoJKK5Zshm5o6n7YHZqlGM7v1og15aWPwC81AG9mw5oEzgmo/usrz/LkyVOoKgNE9Ouou3ZOtlI/7f5RpJg9nKwSJcdDuw6lHV8KBuMt29eANKUdera0TlsSlp26VCIvHD2OrdfMSFKdl6Tf9i9MNB9f1meyxmKnE9je+G5YXaGuEMTiaKfdwQBBBtVpysn0CrbcbZZOwML0jNagP60rvYUvEvEtvE9m9nV3X9X+Ww984UvFAMEdOyfzVJjNNlTLoWvvuRUAT+5wlgTNPiKEI9/4Fl48/Jp+9EduY+/cuXb+86189efNfmWm6IL+0HeBLE1MkqCL3tLvbAaZLULDdi/nBYTH4NnppIS6rtOwps57+UNf8y19j+wtfWtM0mQ7Ij/xE5/CB+56r7eNCgm4/4H/RNohmPdlp+wIqzW5ZQF4eRR+6K73EPOSBggh3A3hs9+z3xuUMMimbFHrWrRorAqhA6UpGIJB0UvHz+PwtHpAzxw8uoNC3UQt04EY49nv9Dc93/af4scQLZWKss3WTIR1HsSw5VkS38Fvi37XA5CFY2NQtszJ75X7+/79+W/qRElBxp6NrgAAAABJRU5ErkJggg=="
@@ -10295,7 +10347,15 @@ do
         if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
             dragging = false
             tw(bscale, 0.18, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-            if not moved then pcall(function() Window:Minimize() end) end
+            if not moved then
+                pcall(function() Window:Minimize() end)
+                if Config.UIAnim ~= false then
+                    pcall(function()
+                        moon.Rotation = 0
+                        tw(moon, 0.5, { Rotation = 360 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+                    end)
+                end
+            end
         end
     end)
     -- the button follows the theme border color
