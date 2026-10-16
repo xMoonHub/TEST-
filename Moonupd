@@ -775,7 +775,7 @@ local function enemyNear()
     if hrp and f then
         for _, e in ipairs(f:GetChildren()) do
             local r, h = e:FindFirstChild("HumanoidRootPart"), e:FindFirstChildOfClass("Humanoid")
-            if r and h and h.Health > 0 and (r.Position - hrp.Position).Magnitude <= 58 then nearV = true break end
+            if r and h and h.Health > 0 and (r.Position - hrp.Position).Magnitude <= (tonumber(Config.AttackRange) or 60) - 2 then nearV = true break end
         end
     end
     return nearV
@@ -839,7 +839,7 @@ local function attackTick()
         -- o ritmo vem dos slots; Fast/Super não esperam nada (1 frame)
         return (Config.AttackMode == "Super Fast Attack") and 0 or 0
     end
-    local cps = AttackCPS[Config.AttackMode] or 3
+    local cps = tonumber(Config.ClickCPS) or AttackCPS[Config.AttackMode] or 3
     if Config.Weapon == "Blox Fruit" then cps = cps * 2 end
     if Config.Weapon == "Gun" then cps = math.min(cps, 24) end -- arma de fogo tem delay de tiro
     return (1 / cps) * (0.85 + math.random() * 0.3)
@@ -1009,7 +1009,7 @@ local function netAttackOnce()
     local function gather(source)
         for _, enemy in ipairs(source) do
             local eh, er = aliveParts(enemy)
-            if eh and not (Config.MastSkip and Config.MastSkip(eh)) and (er.Position - root.Position).Magnitude <= 60 then
+            if eh and not (Config.MastSkip and Config.MastSkip(eh)) and (er.Position - root.Position).Magnitude <= (tonumber(Config.AttackRange) or 60) then
                 targets[#targets + 1] = { enemy, er } -- 1 parte por mob (mandar todas as partes travava o jogo)
                 if #targets >= math.min(NET_MAX_TARGETS, math.max(2, (Fight.bringMax and os.clock() < (Fight.bringUntil or 0) and Fight.bringMax) or Config.Bring or 2)) then break end
             end
@@ -1025,26 +1025,26 @@ local function netAttackOnce()
     end
     if #targets == 0 then return end
 
-    -- registra o RegisterHit no máximo 1x por segundo (repetir isso a cada ciclo acumulava conexões)
-    if os.clock() - (NetAtk.regAt or 0) > 1 then
-        NetAtk.regAt = os.clock()
-        NetAtk.netModule:RemoteEvent("RegisterHit", true)
+    -- v34 (Quantum): sem o InvokeServer("seed") por golpe (era uma ida e volta ao servidor a cada ataque = o delay)
+    if not NetAtk.hitRE then
+        local okH, re = pcall(function() return NetAtk.netModule:RemoteEvent("RegisterHit", true) end)
+        NetAtk.hitRE = (okH and re) or NetAtk.hit
     end
-    local rep = ({ ["Fast Attack"] = 2, ["Super Fast Attack"] = 6 })[Config.AttackMode] or 1
-    for _ = 1, rep do NetAtk.reg:FireServer(0) end
-
-    local head = targets[1][1]:FindFirstChild("Head")
-    if head and NetAtk.remote and NetAtk.id then
-        local uidStr = tostring(Player.UserId):sub(2, 4)
-        local coStr = tostring(coroutine.running()):sub(11, 15)
-        for _ = 1, rep do NetAtk.hit:FireServer(head, targets, {}, uidStr .. coStr) end
-
-        local remoteName = string.gsub("RE/RegisterHit", ".", function(c)
-            return string.char(bit32.bxor(string.byte(c), math.floor((workspace:GetServerTimeNow() / 10) % 10) + 1))
-        end)
-        local seedValue = NetAtk.seed:InvokeServer() * 2
-        local xorValue = bit32.bxor(NetAtk.id + 909090, seedValue)
-        NetAtk.cloneref(NetAtk.remote):FireServer(remoteName, xorValue, head, targets)
+    local parts = { "RightLowerArm", "RightUpperArm", "LeftLowerArm", "LeftUpperArm", "RightHand", "LeftHand" }
+    local maxHits = root:FindFirstChild("Buddha") and 10 or 2
+    local hits, first = {}, nil
+    for i = 1, math.min(#targets, maxHits) do
+        local m = targets[i][1]
+        local p = m:FindFirstChild(parts[math.random(#parts)]) or targets[i][2]
+        hits[#hits + 1] = { m, p }
+        first = first or p
+    end
+    if not first then return end
+    local rep = ({ ["Fast Attack"] = 1, ["Super Fast Attack"] = 2 })[Config.AttackMode] or 1
+    local hash = tostring(Player.UserId):sub(2, 4) .. tostring(coroutine.running()):sub(11, 15)
+    for _ = 1, rep do
+        NetAtk.reg:FireServer(0)
+        NetAtk.hitRE:FireServer(first, hits, nil, nil, hash)
     end
 end
 
@@ -1079,20 +1079,12 @@ doNetAttack = function()
         limit = math.max(2, math.ceil(limit / 2))
         gap = math.max(gap, 0.01)
     end
+    gap = math.max(gap, 1 / math.max(1, tonumber(Config.ClickCPS) or 120))
     local now = os.clock()
     if now - netLastLaunch < gap then return true end
-    local free = limit - netInflight()
-    for _ = 1, math.max(0, free) do
-        netLastLaunch = os.clock()
-        NetAtk.seq += 1
-        local id = NetAtk.seq
-        NetAtk.slots[id] = netLastLaunch
-        task.spawn(function()
-            pcall(netAttackOnce)
-            NetAtk.slots[id] = nil
-            NetAtk.lastDone = os.clock()
-        end)
-    end
+    netLastLaunch = now
+    NetAtk.lastDone = now
+    pcall(netAttackOnce) -- v34: direto, 1 ciclo por passo do loop (como o Quantum, 1x por frame)
     return true
 end
 
@@ -2092,6 +2084,15 @@ task.spawn(function()
     end
 end)
 
+-- NPC da quest pelas coordenadas conhecidas (QuestTables); nil se nao houver
+function DHF.npcFor(name, level)
+    for _, tb in pairs(QuestTables) do
+        for _, e in ipairs(tb) do
+            if e.quest == name and e.idx == level and e.npc then return e.npc end
+        end
+    end
+end
+
 -- ---------- pegar a quest ----------
 function DHF.take(data, reason)
     if os.clock() - DHF.lastTry < 2 then return end
@@ -2112,6 +2113,9 @@ function DHF.take(data, reason)
         local sp = DHF.nearestSpawn(data.Mobs)
         if sp then cf = sp.CFrame * CFrame.new(0, 12, 0) end
     end
+    -- v37: o servidor so aceita perto do NPC. Vai ate ele (coordenada conhecida) e aceita la.
+    local npcCF = DHF.npcFor(data.Quest.Name, data.Quest.Level)
+    if npcCF then cf = CFrame.new(npcCF.Position + Vector3.new(0, 3, 0)) end
     local function start()
         invoke("StartQuest", data.Quest.Name, data.Quest.Level)
         local t0 = os.clock()
@@ -2121,7 +2125,8 @@ function DHF.take(data, reason)
     do
         local t0, lastTry, arrivedAt = os.clock(), 0, nil
         while Alive and Config.Mode == "Level" and os.clock() - t0 < 90 and not DHF.uiActive() do
-            if os.clock() - lastTry > 0.8 then
+            local _, hn = getChar()
+            if os.clock() - lastTry > 0.6 and (not npcCF or (hn and (hn.Position - npcCF.Position).Magnitude <= 25)) then
                 lastTry = os.clock()
                 task.spawn(invoke, "StartQuest", data.Quest.Name, data.Quest.Level)
             end
@@ -2164,9 +2169,18 @@ function DHF.take(data, reason)
             end
         end
     end
-    DHF.takenAt, DHF.lastSeen = os.clock(), os.clock()
-    DHF.lastCur, DHF.lastMax = 0, nil
-    DHF.kills = 0
+    if DHF.uiActive() then
+        DHF.takeFails = 0
+    else
+        DHF.takeFails = (DHF.takeFails or 0) + 1
+    end
+    -- so marca como "pegou" se a janela da quest abriu (ou 2 tentativas seguidas sem conseguir ler a janela)
+    if DHF.takeFails == 0 or DHF.takeFails >= 2 then
+        DHF.takeFails = 0
+        DHF.takenAt, DHF.lastSeen = os.clock(), os.clock()
+        DHF.lastCur, DHF.lastMax = 0, nil
+        DHF.kills = 0
+    end
 end
 
 -- ---------- Submerged Island ----------
@@ -5080,29 +5094,15 @@ function TeamPick.click(btn)
     end)
 end
 task.spawn(function()
-    task.wait(1)
     local t0 = os.clock()
-    while Alive and os.clock() - t0 < 120 do
-        if Player.Team ~= nil then return end -- já tem time
-        local pg = Player:FindFirstChild("PlayerGui")
-        local gui = pg and pg:FindFirstChild("Main (minimal)")
-        local choose = gui and gui:FindFirstChild("ChooseTeam")
-        local container = choose and choose:FindFirstChild("Container")
-        if container and Config.AutoTeam ~= false then
+    while Alive and Player.Team == nil and os.clock() - t0 < 300 do
+        if Config.AutoTeam ~= false then
             local team = (genv.Team == "Marines" or genv.Team == "Pirates") and genv.Team or Config.Team
-            local card = container:FindFirstChild(team)
-            local frame = card and card:FindFirstChild("Frame")
-            local btn = frame and frame:FindFirstChild("TextButton")
-            if btn then
-                TeamPick.tried += 1
-                TeamPick.click(btn)
-                task.wait(1)
-                if Player.Team == nil and TeamPick.tried % 3 == 0 then
-                    invoke("SetTeam", team) -- plano B: pelo remote do jogo
-                end
-            end
+            pcall(function()
+                ReplicatedStorage.Remotes.CommonF:InvokeServer("SetTeam", team)
+            end)
         end
-        task.wait(1.5)
+        task.wait(0.5)
     end
 end)
 
@@ -5120,7 +5120,7 @@ do
 local HttpService = game:GetService("HttpService")
 local SAVE_FILE = "MoonHub_KeyPro.json"
 local SAVED_KEYS = { "AutoAwaken", "RaceReroll", "RaceTarget", "RaceGhoul", "RaceGhoulHop", "RaceCyborg", "RaceV2", "RaceV3", "RaceV3Pvp", "RaceLever", "RaceGear", "RaceV4Auto", "MastOn", "MastKeys", "MastGunKeys", "MastMode", "MastMethod", "MastHP", "MastFast", "MastGunAim", "MastHold", "MastAllSword", "MastAllMelee", "MastAllGun", "PrioDefault", "UIScale", "MobileMode", "UIAspect", "UIAnimStyle", "UIAnim", "UIAnimSpeed", "UIW", "UIH", "UILock", "KitTP", "KitSpawn", "KitSummon", "KitCollect", "KitTrade", "KitAzure", "LevSpy", "LevFind", "LevSpeed", "LevBack", "LevStart", "LevTP", "LevBoatTo", "LevAttack", "LevFruit", "LevDragon", "LevFast", "LevHold", "LevWeapons", "LevKeys", "LevGuitar", "LevSkills", "LevHeart", "VulcRockW", "VulcRockK", "VulcTreeW", "VulcTreeK", "VulcPull", "VulcPullMax", "AimOn", "AimHitChance", "AimAutoPing", "AimFF", "AimFriends", "AimGate", "AimInfo", "AimMode", "AimTargets", "AimPriority", "AimPart", "AimFOV", "AimShowFOV", "AimFOVColor", "AimFOVOrigin", "AimSmooth", "AimPredict", "AimPredictOn", "AimMaxDist", "AimVisible", "AimTeam", "AimSticky", "AimTrigger", "AimKey", "AimHighlight", "AimLine", "AimMinHP", "DunDiff", "DunMin", "DunStart", "DunFollow", "DunJoin", "DunWeapon", "DunFarm", "DunCard", "Mode", "KillTyrant", "TyrantQuest", "TyrantSpawn", "TyrantKill",
-    "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones", "IgnoreCakePrince", "AutoQuestKing", "KillDoughKing", "SummonDoughKing", "IgnoreDoughChaliceFarm", "RandomBones", "AutoPray", "AutoTryLuck", "ShootGunTyrant",
+    "ClickCPS", "AttackRange", "AutoQuestDough", "KillDoughPrince", "SummonDoughPrince", "AutoQuestBones", "IgnoreCakePrince", "AutoQuestKing", "KillDoughKing", "SummonDoughKing", "IgnoreDoughChaliceFarm", "RandomBones", "AutoPray", "AutoTryLuck", "ShootGunTyrant",
     "Weapon", "AttackMode", "Bring", "TweenSpeed", "AutoBuso", "AutoKen", "AutoV3", "AutoV4",
     "RemoveFog", "FpsBooster", "ToggleKey",
     "PirateRaid", "Factory", "Elite", "EliteHop", "ChestFarm", "ChestHop", "ChestCount",
@@ -6971,12 +6971,24 @@ do
     local idx = ({ ["Normal Attack"] = 1, ["Fast Attack"] = 2, ["Super Fast Attack"] = 3 })[Config.AttackMode] or 1
     Tabs.Farm:AddDropdown("AttackMode", {
         Title = "Attack Method", Values = { "Fast Attack", "Super Fast Attack", "Supreme Fast Attack" }, Default = idx,
-        Description = "Quanto mais rápido, maior o risco de ban. Sem proteção de FPS: clica o mais rápido possível.",
+        Description = "The faster, the higher the ban risk. No FPS protection: clicks as fast as possible.",
     }):OnChanged(function(v)
         Config.AttackMode = ui2mode[v] or "Normal Attack"
         persist()
     end)
 end
+
+Tabs.Farm:AddSection("Click Settings")
+if tonumber(Config.ClickCPS) == nil then Config.ClickCPS = 120 end
+if tonumber(Config.AttackRange) == nil then Config.AttackRange = 60 end
+Tabs.Farm:AddSlider("ClickCPS", {
+    Title = "Click CPS", Description = "Attacks per second (120+ = no limit, one attack per frame)",
+    Min = 5, Max = 240, Default = math.clamp(tonumber(Config.ClickCPS) or 120, 5, 240), Rounding = 0,
+}):OnChanged(function(v) Config.ClickCPS = math.floor(v); persist() end)
+Tabs.Farm:AddSlider("AttackRange", {
+    Title = "Attack Range", Description = "Distance (studs) at which mobs are hit. Higher = hits from farther away",
+    Min = 20, Max = 100, Default = math.clamp(tonumber(Config.AttackRange) or 60, 20, 100), Rounding = 0,
+}):OnChanged(function(v) Config.AttackRange = math.floor(v); persist() end)
 
 Tabs.Farm:AddSection("General Farm Settings")
 do
@@ -12439,7 +12451,7 @@ end)
 AFL.modDone('diag', __ok, __e) end
 task.defer(function()
     local M = AFL.Mods
-    local msg = string.format("Build %s | %d modules loaded", "20261016-1738", #M.ok)
+    local msg = string.format("Build %s | %d modules loaded", "20261016-1753", #M.ok)
     if #M.fail > 0 then msg = msg .. "\nFAILED: " .. table.concat(M.fail, "\n") end
     pcall(function() Fluent:Notify({ Title = "Moon Hub", Content = msg, Duration = (#M.fail > 0) and 25 or 6 }) end)
 end)
